@@ -7,3 +7,4 @@ __pycache__/
 harvest_run.log
 *.bak
 akun.txt.real
+sessions/

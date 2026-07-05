@@ -2,127 +2,118 @@
 
 Auto-harvest Cloudflare Workers AI API tokens and inject into 9Router. Free inference at scale.
 
-## What it does
+## Architecture (2-phase)
 
 ```
-your accounts (akun.txt)
-    ↓
-bot_cf.py (Chrome automation → CF internal API)
-    ↓
-cf_keys.txt (harvested API tokens)
-    ↓
-inject_9router.py (POST to 9Router built-in provider)
-    ↓
-cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast → FREE
+PHASE 1 — Login (browser, once per account — touches Google BotGuard once)
+    login_capture.py
+        ↓ saves: sessions/<email>.json  (Google cookie jar, lasts weeks-months)
+        ↓ persists: .chrome_profiles/<email>/  (Chrome profile, stays logged in)
+
+PHASE 2A — Harvest (hybrid: browser silent OAuth + CF API)  [RECOMMENDED]
+    harvest_hybrid.py
+        ↓ reuses Chrome profile → CF OAuth silent (no BotGuard, no password)
+        ↓ creates token via CF internal fetch API
+        ↓ saves: cf_keys.txt
+
+PHASE 2B — Harvest (pure HTTP, experimental)  [MAY FAIL on PKCE]
+    harvest_http.py
+        ↓ loads Google cookies from sessions/<email>.json
+        ↓ follows CF OAuth redirect chain via curl_cffi (TLS fingerprint spoof)
+        ↓ auto-detects PKCE / CSRF / state / client_id at runtime
+        ↓ falls back gracefully, tells you to use hybrid if PKCE blocks
+
+PHASE 3 — Inject into 9Router
+    inject_9router.py
+        ↓ reads cf_keys.txt
+        ↓ POST to 9Router built-in cloudflare-ai provider
 ```
 
-Uses 9Router's **built-in `cloudflare-ai` provider**. No custom provider setup needed — just add API keys and go.
+**Key insight (from research):** Google BotGuard only gates the *password login step*,
+NOT the OAuth authorize step. Once Google session cookies exist (from a one-time browser
+login), all future CF OAuth grants are silent 302-redirects — no BotGuard, no password.
+This is how operators scale to 6000+ connections.
+
+## Why browser can't be fully eliminated
+
+- Google BotGuard blocks pure-HTTP login (JS eval required for `bgRequest` token)
+- CF may use PKCE (`code_verifier` generated in browser-side JS) → HTTP replay fails
+- Cloudflare CSRF header name (`X-Atok`) rotates with dash frontend versions
+- **One-time browser login = permanent cfut_ token** → browser rarely needed after initial harvest
 
 ## Free models (auto-registered by 9Router)
 
-**Chat (13 models):**
-- `cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast` — Llama 3.3 70B
+**Chat:**
+- `cf/@cf/zai-org/glm-5.2` — GLM 5.2 (reasoning)
 - `cf/@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` — DeepSeek R1 32B
+- `cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast` — Llama 3.3 70B
 - `cf/@cf/moonshotai/kimi-k2.6` — Kimi K2.6
 - `cf/@cf/qwen/qwen2.5-coder-32b-instruct` — Qwen 2.5 Coder 32B
 - `cf/@cf/qwen/qwq-32b` — QwQ 32B
 - `cf/@cf/zai-org/glm-4.7-flash` — GLM 4.7 Flash
-- `cf/@cf/zai-org/glm-5.2` — GLM 5.2 (auto-registered by inject)
-- `cf/@cf/mistralai/mistral-small-3.1-24b-instruct` — Mistral Small 3.1 24B
-- ...and more
 
-**Image (8 models):**
-- `cf/@cf/black-forest-labs/flux-2-klein-9b` — FLUX.2 Klein 9B
-- `cf/@cf/black-forest-labs/flux-2-dev` — FLUX.2 Dev
-- `cf/@cf/stabilityai/stable-diffusion-xl-base-1.0` — SDXL
-- ...and more
-
-## Prerequisites
-
-- Python 3.10+
-- Chrome/Chromium installed
-- 9Router running on `localhost:20128`
+**Limit:** 100K requests/day per account, 30 RPM. 9Router load-balances across all injected tokens.
 
 ## Setup
 
 ```bash
-git clone https://github.com/feb-frmn/9router-auto-cf.git
+git clone https://github.com/feb-frmn/9router-auto-cf
 cd 9router-auto-cf
-pip install DrissionPage
+pip install DrissionPage curl_cffi python-dotenv
 ```
 
-### 1. Add your accounts
+## Usage
 
 ```bash
+# 1. Buat akun.txt
 cp akun.txt.example akun.txt
-nano akun.txt
-```
+nano akun.txt  # isi: email|password (satu per baris)
 
-Format: `email|password` per line
+# 2. Login & capture session (browser, 1x per akun — kena BotGuard sekali)
+xvfb-run -a python3 login_capture.py
+# atau test 1 akun:
+xvfb-run -a python3 login_capture.py --only user@domain.com
 
-### 2. Harvest tokens
+# 3A. Harvest via hybrid (RECOMMENDED — pasti jalan)
+xvfb-run -a python3 harvest_hybrid.py
 
-```bash
-python3 bot_cf.py          # harvest all (auto-skip already done)
-python3 bot_cf.py --clean  # fresh run
-```
+# 3B. Harvest via pure HTTP (eksperimental — lebih cepat, mungkin kena PKCE)
+python3 harvest_http.py
+# atau test 1 akun:
+python3 harvest_http.py --only user@domain.com
 
-### 3. Inject into 9Router
-
-```bash
+# 4. Inject ke 9Router
 python3 inject_9router.py
+
+# ATAU all-in-one (bot lama, tetap bisa dipakai):
+xvfb-run -a python3 bot_cf.py
 ```
 
-That's it. No restart needed. Models auto-discovered.
+## akun.txt format
 
-### 4. Use it
-
-```bash
-curl http://localhost:20128/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast","messages":[{"role":"user","content":"hello"}]}'
 ```
-
-Works with any OpenAI-compatible client. Use `cf/<model-id>` as model name.
-
-## How it works
-
-1. **Harvest**: Chrome per account → Google OAuth → CF Dashboard → API token via CF internal API → save to `cf_keys.txt`
-
-2. **Inject**: Reads `cf_keys.txt` → `POST /api/providers` per token → adds as connection to built-in `cloudflare-ai` provider with `accountId` in `providerSpecificData`
-
-3. **Route**: `cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast` → 9Router strips `cf/` → forwards to `https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions`
-
-9Router load-balances across all connections automatically.
+user1@example.com|password1
+user2@example.com|password2
+```
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `bot_cf.py` | Chrome harvester — login + token creation |
-| `inject_9router.py` | Reads cf_keys.txt → POST to 9Router API |
-| `akun.txt.example` | Account list template |
-| `akun.txt` | Your accounts (gitignored) |
-| `cf_keys.txt` | Harvested tokens (gitignored) |
+| File | Fungsi |
+|------|--------|
+| `login_capture.py` | Login Google 1x per akun, simpan cookie jar + persist Chrome profile |
+| `harvest_hybrid.py` | Harvest token via browser silent OAuth (RECOMMENDED) |
+| `harvest_http.py` | Harvest token via pure-HTTP curl_cffi (eksperimental) |
+| `bot_cf.py` | All-in-one original bot (login + harvest dalam 1 script) |
+| `inject_9router.py` | Inject cf_keys.txt ke 9Router built-in provider |
+| `akun.txt` | Akun list (gitignored) |
+| `cf_keys.txt` | Harvested API tokens (gitignored) |
+| `sessions/` | Google cookie jars per akun (gitignored) |
+| `.chrome_profiles/` | Chrome profiles per akun (gitignored) |
 
-## Options
+## Notes
 
-```bash
-python3 bot_cf.py              # harvest all accounts
-python3 bot_cf.py --clean      # clear cf_keys.txt and start fresh
-python3 inject_9router.py      # inject all tokens to 9Router
-```
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| "Tab Google OAuth gak muncul" | Kill Chrome first. One instance at a time. |
-| "Field password gak muncul" | Google CAPTCHA. Try different IP. |
-| "API gagal bikin token" | CF rate limit. Wait a few minutes, re-run. |
-| inject: "sudah ada" | Normal — dedup. Skipped automatically. |
-| Model returns 502 | 9Router auto-retries on next connection. |
-
-## License
-
-MIT
+- **Profile persist by email** (not index) — aman kalau urutan akun.txt berubah
+- **IP consistency** penting — Google mendeteksi IP jump dan paksa re-login
+- **Session lifetime** — Google cookies tahan weeks-months dengan profile persist
+- **PKCE detection** — harvest_http.py auto-deteksi dan kasih pesan jelas kalau kena PKCE
+- **cfut_ tokens are permanent** — sekali harvest, gak perlu login ulang
