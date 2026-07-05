@@ -19,8 +19,12 @@ import os, sys, json, re, urllib.request
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KEY_FILE = os.path.join(SCRIPT_DIR, "cf_keys.txt")
 NINEROUTER_API = "http://localhost:20128"
-
 PROVIDER = "cloudflare-ai"
+
+# Models that exist on CF but aren't in 9Router's built-in registry
+EXTRA_MODELS = [
+    {"id": "@cf/zai-org/glm-5.2", "name": "GLM 5.2"},
+]
 
 def extract_account_id(base_url):
     """Extract account_id from CF base URL."""
@@ -75,6 +79,34 @@ def add_connection(api_key, account_id, name):
         return False, msg
     except Exception as e:
         return False, str(e)
+
+def register_extra_models():
+    """Register models that exist on CF but aren't in 9Router's built-in list."""
+    if not EXTRA_MODELS:
+        return
+    print(f"\n📋 Register {len(EXTRA_MODELS)} extra model...")
+    for model in EXTRA_MODELS:
+        payload = json.dumps({
+            "providerAlias": PROVIDER,
+            "id": model["id"],
+            "type": "llm",
+            "name": model["name"]
+        }).encode()
+        try:
+            req = urllib.request.Request(
+                f"{NINEROUTER_API}/api/models/custom",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result = json.loads(resp.read())
+            if result.get("success"):
+                print(f"  ✅ {PROVIDER}/{model['id']} → {model['name']}")
+            else:
+                print(f"  ⚠️  {model['id']}: {result}")
+        except Exception as e:
+            print(f"  ❌ {model['id']}: {e}")
 
 def inject():
     if not os.path.exists(KEY_FILE):
@@ -131,6 +163,9 @@ def inject():
         else:
             failed += 1
             print(f"       ❌ Gagal: {result}")
+
+    # Register extra models not in built-in registry
+    register_extra_models()
 
     print(f"\n{'='*55}")
     print(f" ✅ Added: {success} | ⏭️  Skip: {skipped} | ❌ Fail: {failed}")

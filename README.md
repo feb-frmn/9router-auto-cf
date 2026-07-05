@@ -27,6 +27,7 @@ Uses 9Router's **built-in `cloudflare-ai` provider**. No custom provider setup n
 - `cf/@cf/qwen/qwen2.5-coder-32b-instruct` — Qwen 2.5 Coder 32B
 - `cf/@cf/qwen/qwq-32b` — QwQ 32B
 - `cf/@cf/zai-org/glm-4.7-flash` — GLM 4.7 Flash
+- `cf/@cf/zai-org/glm-5.2` — GLM 5.2 (auto-registered by inject)
 - `cf/@cf/mistralai/mistral-small-3.1-24b-instruct` — Mistral Small 3.1 24B
 - ...and more
 
