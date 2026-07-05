@@ -3,3 +3,7 @@ cf_keys.txt
 __pycache__/
 *.pyc
 .venv/
+.chrome_profiles/
+harvest_run.log
+*.bak
+akun.txt.real

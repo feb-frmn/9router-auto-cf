@@ -104,15 +104,54 @@ def harvest_cf(account, index, total):
     co.set_argument("--no-sandbox")
     co.set_argument("--disable-gpu")
     co.set_argument("--disable-dev-shm-usage")
+    # BUG FIX: user-data-dir unik + port unik per akun → tiap akun benar-benar
+    # fresh profile, gak ada cookie bleed antar akun. Tanpa ini semua akun share
+    # profile default (session akun pertama) → account_id kebaca sama semua.
+    profile_dir = os.path.join(SCRIPT_DIR, ".chrome_profiles", f"acc_{index}")
+    os.makedirs(profile_dir, exist_ok=True)
+    co.set_argument(f"--user-data-dir={profile_dir}")
+    co.set_local_port(9222 + index)  # port unik biar gak nyambung ke instance lain
     main_page = page = ChromiumPage(co)
     
     try:
+        # ── [0] LOGOUT dulu — bersihin session akun sebelumnya ──
+        # BUG FIX: tanpa ini, cookie akun sebelumnya nyangkut → semua akun
+        # kebaca sebagai akun pertama (account_id sama). Wajib clear session.
+        print(" [0] Logout & clear session akun sebelumnya...")
+        try:
+            page.get("https://dash.cloudflare.com/logout")
+            time.sleep(random.uniform(2.0, 3.0))
+        except:
+            pass
+        # Clear semua cookies (CF + Google) biar OAuth mulai fresh
+        try:
+            page.set.cookies.clear()
+        except:
+            pass
+        try:
+            page.get("https://accounts.google.com/Logout")
+            time.sleep(random.uniform(2.0, 3.0))
+            page.set.cookies.clear()
+        except:
+            pass
+
         # ── [1] Login Cloudflare ──
         print(" [1] Buka Cloudflare Login...")
         page.get("https://dash.cloudflare.com/login")
         time.sleep(random.uniform(4.0, 6.0))
         
         # Cek apakah udah login (redirect ke dashboard)
+        # Setelah logout+clear cookies, ini HARUS false. Kalau masih true,
+        # berarti clear gagal → jangan trust, tetap paksa login ulang.
+        if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
+            print("    ⚠️  Masih ada session — clear cookies lagi & reload login")
+            try:
+                page.set.cookies.clear()
+            except:
+                pass
+            page.get("https://dash.cloudflare.com/login")
+            time.sleep(random.uniform(3.0, 5.0))
+
         if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
             print("    Udah login (session tersimpan)")
         else:
@@ -296,7 +335,7 @@ def main():
         if ok:
             success += 1
         if i < len(accounts):
-            delay = random.randint(45, 90)
+            delay = random.randint(8, 15)
             print(f"\nTunggu {delay}s...")
             time.sleep(delay)
     
