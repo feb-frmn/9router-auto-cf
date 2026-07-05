@@ -7,33 +7,40 @@ Auto-harvest Cloudflare Workers AI API tokens and inject into 9Router. Free infe
 ```
 your accounts (akun.txt)
     ↓
-bot_cf.py (Chrome automation)
+bot_cf.py (Chrome automation → CF internal API)
     ↓
 cf_keys.txt (harvested API tokens)
     ↓
-inject_9router.py (auto-inject to 9Router DB)
+inject_9router.py (POST to 9Router built-in provider)
     ↓
-9Router: cfai/@cf/zai-org/glm-5.2 → FREE
+cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast → FREE
 ```
 
-Each Cloudflare account gets its own API token + endpoint. 9Router load-balances across all of them automatically.
+Uses 9Router's **built-in `cloudflare-ai` provider**. No custom provider setup needed — just add API keys and go.
 
-## Free models
+## Free models (auto-registered by 9Router)
 
-| Model | ID |
-|-------|-----|
-| GLM 5.2 | `cfai/@cf/zai-org/glm-5.2` |
-| DeepSeek R1 32B | `cfai/@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` |
-| Llama 3.3 70B | `cfai/@cf/meta/llama-3.3-70b-instruct-fp8-fast` |
-| Llama 3.1 70B | `cfai/@cf/meta/llama-3.1-70b-instruct` |
-| Qwen 2.5 Coder 32B | `cfai/@cf/qwen/qwen2.5-coder-32b-instruct` |
+**Chat (13 models):**
+- `cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast` — Llama 3.3 70B
+- `cf/@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` — DeepSeek R1 32B
+- `cf/@cf/moonshotai/kimi-k2.6` — Kimi K2.6
+- `cf/@cf/qwen/qwen2.5-coder-32b-instruct` — Qwen 2.5 Coder 32B
+- `cf/@cf/qwen/qwq-32b` — QwQ 32B
+- `cf/@cf/zai-org/glm-4.7-flash` — GLM 4.7 Flash
+- `cf/@cf/mistralai/mistral-small-3.1-24b-instruct` — Mistral Small 3.1 24B
+- ...and more
+
+**Image (8 models):**
+- `cf/@cf/black-forest-labs/flux-2-klein-9b` — FLUX.2 Klein 9B
+- `cf/@cf/black-forest-labs/flux-2-dev` — FLUX.2 Dev
+- `cf/@cf/stabilityai/stable-diffusion-xl-base-1.0` — SDXL
+- ...and more
 
 ## Prerequisites
 
 - Python 3.10+
 - Chrome/Chromium installed
-- 9Router running with [add-provider-db.sh](https://github.com/feb-frmn/9router-add-provider)
-- sqlite3 (`sudo apt install sqlite3`)
+- 9Router running on `localhost:20128`
 
 ## Setup
 
@@ -52,28 +59,12 @@ nano akun.txt
 
 Format: `email|password` per line
 
-```
-user1@gmail.com|yourpassword
-user2@gmail.com|yourpassword
-```
-
-Google accounts that have access to Cloudflare Dashboard. Google Workspace accounts work great.
-
 ### 2. Harvest tokens
 
 ```bash
-# Run all accounts (auto-skip already harvested)
-python3 bot_cf.py
-
-# Fresh run (clears previous tokens)
-python3 bot_cf.py --clean
+python3 bot_cf.py          # harvest all (auto-skip already done)
+python3 bot_cf.py --clean  # fresh run
 ```
-
-Per account: ~2-3 min (login + token creation + human-like delays). The bot handles:
-- Google OAuth login (including Account Chooser, Workspace TOS, consent screens)
-- Account ID extraction from CF Dashboard
-- API token creation via CF internal API (all Workers AI permissions)
-- Deduplication (skips accounts already in cf_keys.txt)
 
 ### 3. Inject into 9Router
 
@@ -81,20 +72,37 @@ Per account: ~2-3 min (login + token creation + human-like delays). The bot hand
 python3 inject_9router.py
 ```
 
-- Creates `cfai` provider node on first run
-- Adds each token as a connection (9Router load-balances)
-- Deduplicates (skips keys already in DB)
-- After inject: `systemctl restart 9router`
+That's it. No restart needed. Models auto-discovered.
 
 ### 4. Use it
 
 ```bash
 curl http://localhost:20128/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"cfai/@cf/zai-org/glm-5.2","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-Works with any OpenAI-compatible client. Just use `cfai/<model-id>` as the model name.
+Works with any OpenAI-compatible client. Use `cf/<model-id>` as model name.
+
+## How it works
+
+1. **Harvest**: Chrome per account → Google OAuth → CF Dashboard → API token via CF internal API → save to `cf_keys.txt`
+
+2. **Inject**: Reads `cf_keys.txt` → `POST /api/providers` per token → adds as connection to built-in `cloudflare-ai` provider with `accountId` in `providerSpecificData`
+
+3. **Route**: `cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast` → 9Router strips `cf/` → forwards to `https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions`
+
+9Router load-balances across all connections automatically.
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `bot_cf.py` | Chrome harvester — login + token creation |
+| `inject_9router.py` | Reads cf_keys.txt → POST to 9Router API |
+| `akun.txt.example` | Account list template |
+| `akun.txt` | Your accounts (gitignored) |
+| `cf_keys.txt` | Harvested tokens (gitignored) |
 
 ## Options
 
@@ -104,43 +112,15 @@ python3 bot_cf.py --clean      # clear cf_keys.txt and start fresh
 python3 inject_9router.py      # inject all tokens to 9Router
 ```
 
-## How it works
-
-1. **Harvest**: Opens Chrome per account → Google OAuth → CF Dashboard → creates API token via `/api/v4/user/tokens` with all 6 Workers AI permissions → saves to `cf_keys.txt`
-
-2. **Inject**: Reads `cf_keys.txt` → calls `add-provider-db.sh` per token → inserts into 9Router's SQLite DB as OpenAI-compatible provider with prefix `cfai`
-
-3. **Route**: User sends `cfai/@cf/zai-org/glm-5.2` → 9Router strips `cfai/` → forwards to CF endpoint with the token's account-scoped URL
-
-Each account has a unique endpoint (`/accounts/{id}/ai/v1`). All share prefix `cfai` but each connection has its own base URL + API key. 9Router tries connections in order — if one hits rate limit, it falls over to the next.
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `bot_cf.py` | Chrome harvester — login + token creation |
-| `inject_9router.py` | Reads cf_keys.txt → injects to 9Router DB |
-| `akun.txt.example` | Account list template |
-| `akun.txt` | Your accounts (gitignored) |
-| `cf_keys.txt` | Harvested tokens (gitignored) |
-
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| "Tab Google OAuth gak muncul" | Kill all Chrome processes first. Only one instance at a time. |
-| "Field password gak muncul" | Google CAPTCHA. Try different IP or wait. |
-| "Gagal ambil Account ID" | Dashboard didn't load. Re-run — skips already harvested. |
+| "Tab Google OAuth gak muncul" | Kill Chrome first. One instance at a time. |
+| "Field password gak muncul" | Google CAPTCHA. Try different IP. |
 | "API gagal bikin token" | CF rate limit. Wait a few minutes, re-run. |
 | inject: "sudah ada" | Normal — dedup. Skipped automatically. |
-| Model not working in 9Router | `systemctl restart 9router` after inject. |
-
-## Requirements
-
-- **Cloudflare account** with Workers AI access (free plan works)
-- **Chrome/Chromium** installed on the machine
-- **9Router** running on the same machine (for inject)
-- **add-provider-db.sh** from [9router-add-provider](https://github.com/feb-frmn/9router-add-provider)
+| Model returns 502 | 9Router auto-retries on next connection. |
 
 ## License
 

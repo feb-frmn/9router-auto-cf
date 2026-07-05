@@ -1,91 +1,84 @@
 #!/usr/bin/env python3
 """
-Cloudflare Workers AI -> 9Router Injector
-Reads cf_keys.txt → injects each token as a connection on the 'cfai' provider node.
-Auto-registers all CF models in 9Router so they appear in /v1/models.
+9Router Auto CF — Inject harvested Cloudflare tokens into 9Router.
+
+Uses 9Router's BUILT-IN cloudflare-ai provider.
+No custom provider needed — just POST connections via the API.
 
 Flow:
-  1. Create/update provider node (prefix=cfai)
-  2. Add connections (one per account, each with own baseUrl + apiKey)
-  3. Register models via /api/models/custom (so they show up in model list)
-  4. Restart 9Router
+  1. bot_cf.py harvests tokens → cf_keys.txt
+  2. This script reads cf_keys.txt → POST /api/providers for each
+  3. 9Router auto-discovers all models (20+ LLM, image, etc.)
+  4. Use: cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast
 
-Model format: cfai/@cf/zai-org/glm-5.2
+Requires: 9Router running on localhost:20128
 """
 
-import os, sys, subprocess, json, sqlite3, urllib.request
+import os, sys, json, re, urllib.request
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KEY_FILE = os.path.join(SCRIPT_DIR, "cf_keys.txt")
-ADD_SCRIPT = os.path.expanduser("~/9router-add-provider/add-provider-db.sh")
-DB_PATH = "/var/lib/9router/db/data.sqlite"
-NODE_NAME = "cf-workers-ai"
-PREFIX = "cfai"
 NINEROUTER_API = "http://localhost:20128"
 
-# All CF Workers AI models to register
-CF_MODELS = [
-    {"id": "@cf/zai-org/glm-5.2", "name": "GLM 5.2"},
-    {"id": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", "name": "DeepSeek R1 32B"},
-    {"id": "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "name": "Llama 3.3 70B"},
-    {"id": "@cf/meta/llama-3.1-70b-instruct", "name": "Llama 3.1 70B"},
-    {"id": "@cf/qwen/qwen2.5-coder-32b-instruct", "name": "Qwen 2.5 Coder 32B"},
-]
+PROVIDER = "cloudflare-ai"
 
-def get_existing_keys():
-    """Get all API keys already in 9Router DB for the cfai provider."""
-    if not os.path.exists(DB_PATH):
-        return set()
+def extract_account_id(base_url):
+    """Extract account_id from CF base URL."""
+    m = re.search(r'/accounts/([a-f0-9]+)/', base_url)
+    return m.group(1) if m else None
+
+def get_existing_connections():
+    """Get existing cloudflare-ai connections from 9Router."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute(
-            "SELECT json_extract(c.data, '$.apiKey') FROM providerConnections c "
-            "JOIN providerNodes n ON c.provider = n.id "
-            "WHERE json_extract(n.data, '$.prefix') = ?", (PREFIX,)
-        ).fetchall()
-        conn.close()
-        return {r[0] for r in rows if r[0]}
+        req = urllib.request.Request(f"{NINEROUTER_API}/api/providers")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        existing = {}
+        for c in data.get("connections", []):
+            if c.get("provider") == PROVIDER:
+                acct = c.get("providerSpecificData", {}).get("accountId", "")
+                if acct:
+                    existing[acct] = c.get("id", "")
+        return existing
     except Exception as e:
-        print(f"  ⚠️  Gagal baca DB: {e}")
-        return set()
+        print(f"  ⚠️  Gagal cek existing connections: {e}")
+        return {}
 
-def register_models():
-    """Register all CF models in 9Router via /api/models/custom."""
-    print(f"\n📋 Register {len(CF_MODELS)} model di 9Router...")
-    success = 0
-    for model in CF_MODELS:
-        payload = json.dumps({
-            "providerAlias": PREFIX,
-            "id": model["id"],
-            "type": "llm",
-            "name": model["name"]
-        }).encode()
+def add_connection(api_key, account_id, name):
+    """Add a cloudflare-ai connection via 9Router API."""
+    payload = json.dumps({
+        "provider": PROVIDER,
+        "apiKey": api_key,
+        "name": name,
+        "providerSpecificData": {
+            "accountId": account_id
+        }
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            f"{NINEROUTER_API}/api/providers",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        if result.get("connection", {}).get("id"):
+            return True, result["connection"]["id"]
+        return False, result.get("error", "unknown error")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
         try:
-            req = urllib.request.Request(
-                f"{NINEROUTER_API}/api/models/custom",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                result = json.loads(resp.read())
-                if result.get("success"):
-                    success += 1
-                    print(f"  ✅ {PREFIX}/{model['id']} → {model['name']}")
-                else:
-                    print(f"  ⚠️  {model['id']}: {result}")
-        except Exception as e:
-            print(f"  ❌ {model['id']}: {e}")
-    print(f"  → {success}/{len(CF_MODELS)} model terdaftar")
+            msg = json.loads(body).get("error", body[:100])
+        except:
+            msg = body[:100]
+        return False, msg
+    except Exception as e:
+        return False, str(e)
 
-def inject_to_9router():
+def inject():
     if not os.path.exists(KEY_FILE):
         print(f"❌ {KEY_FILE} belum ada. Jalankan bot_cf.py dulu.")
-        return
-
-    if not os.path.exists(ADD_SCRIPT):
-        print(f"❌ {ADD_SCRIPT} belum ada.")
-        print("   Clone: git clone https://github.com/feb-frmn/9router-add-provider ~/9router-add-provider")
         return
 
     with open(KEY_FILE, "r") as f:
@@ -95,10 +88,10 @@ def inject_to_9router():
         print("❌ cf_keys.txt kosong.")
         return
 
-    existing_keys = get_existing_keys()
-    print(f"📋 Ditemukan {len(lines)} key di cf_keys.txt")
-    print(f"📋 Sudah ada {len(existing_keys)} key di 9Router DB")
-    print(f"📋 Prefix: {PREFIX} | Node: {NODE_NAME}")
+    existing = get_existing_connections()
+    print(f"📋 {len(lines)} key di cf_keys.txt")
+    print(f"📋 {len(existing)} connection sudah ada di 9Router")
+    print(f"📋 Provider: {PROVIDER} (built-in)")
     print()
 
     success = 0
@@ -113,52 +106,37 @@ def inject_to_9router():
             continue
 
         name, base_url, api_key, models_json = parts
+        account_id = extract_account_id(base_url)
 
-        if api_key in existing_keys:
-            print(f"  [{i}] ⏭️  Skip (sudah ada): {name} → {api_key[:20]}...")
+        if not account_id:
+            print(f"  [{i}] ❌ Gagal extract account_id dari: {base_url[:60]}")
+            failed += 1
+            continue
+
+        # Dedup
+        if account_id in existing:
+            print(f"  [{i}] ⏭️  Skip (sudah ada): {account_id[:12]}...")
             skipped += 1
             continue
 
-        print(f"  [{i}] Injecting {name}...")
-        print(f"       URL: {base_url}")
+        print(f"  [{i}] Adding {name}...")
+        print(f"       Account: {account_id[:16]}...")
         print(f"       Key: {api_key[:25]}...")
 
-        result = subprocess.run([
-            "bash", ADD_SCRIPT,
-            "--name", NODE_NAME,
-            "--prefix", PREFIX,
-            "--url", base_url,
-            "--key", api_key
-        ], capture_output=True, text=True)
-
-        if "Done!" in result.stdout:
+        ok, result = add_connection(api_key, account_id, name)
+        if ok:
             success += 1
-            existing_keys.add(api_key)
-            print(f"       ✅ Berhasil")
-        elif "already exists" in result.stdout:
-            skipped += 1
-            print(f"       ⏭️  Sudah ada (via script)")
+            existing[account_id] = result
+            print(f"       ✅ Berhasil (id: {result[:12]})")
         else:
             failed += 1
-            print(f"       ❌ Gagal: {result.stdout[:150]}")
-            if result.stderr:
-                print(f"       stderr: {result.stderr[:150]}")
-
-    # Auto-register models
-    register_models()
-
-    # Restart 9Router if any changes were made
-    if success > 0:
-        print(f"\n🔄 Restart 9Router...")
-        subprocess.run(["systemctl", "restart", "9router"], capture_output=True)
-        print(f"   ✅ 9Router restarted")
+            print(f"       ❌ Gagal: {result}")
 
     print(f"\n{'='*55}")
-    print(f" ✅ Inject: {success} | ⏭️  Skip: {skipped} | ❌ Fail: {failed}")
-    print(f" Total connections: {success + skipped + len(existing_keys)}")
-    print(f" Models: {', '.join(m['id'] for m in CF_MODELS)}")
-    print(f" Format: {PREFIX}/@cf/zai-org/glm-5.2")
+    print(f" ✅ Added: {success} | ⏭️  Skip: {skipped} | ❌ Fail: {failed}")
+    print(f" Total connections: {len(existing)}")
+    print(f" Prefix: cf/  (example: cf/@cf/meta/llama-3.3-70b-instruct-fp8-fast)")
     print(f"{'='*55}")
 
 if __name__ == "__main__":
-    inject_to_9router()
+    inject()
