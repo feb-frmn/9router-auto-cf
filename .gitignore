@@ -1,0 +1,5 @@
+akun.txt
+cf_keys.txt
+__pycache__/
+*.pyc
+.venv/
