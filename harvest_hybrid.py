@@ -101,17 +101,18 @@ def harvest_one(account, index, total, harvested, fast=False):
     co.set_argument("--disable-dev-shm-usage")
     co.set_argument(f"--user-data-dir={profile_dir}")
     # Unique port per account (avoid conflicts)
-    port = 9400 + (index % 100)
+    port = 9400 + index
     co.set_local_port(port)
     page = ChromiumPage(co)
 
+    main_page = page  # save ref before tab reassignment (bug #1)
     try:
         # Step 1: Check CF session
         print(" [1] Opening CF login...")
         page.get("https://dash.cloudflare.com/login")
         time.sleep(random.uniform(*delays))
 
-        if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
+        if "dash.cloudflare.com/" in (page.url or "") and "/login" not in (page.url or ""):
             print("    ✅ CF session active (persisted profile)")
         else:
             # Step 2: OAuth Google (silent if Google session active)
@@ -163,9 +164,9 @@ def harvest_one(account, index, total, harvested, fast=False):
             print(" [3] Waiting for CF dashboard redirect...")
             for _ in range(15):
                 time.sleep(1 if fast else 2)
-                if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
+                if "dash.cloudflare.com/" in (page.url or "") and "/login" not in (page.url or ""):
                     break
-            if "/login" in page.url:
+            if "/login" in (page.url or ""):
                 raise Exception("Redirect to CF dashboard failed")
 
         # Step 4: Get account ID
@@ -178,17 +179,18 @@ def harvest_one(account, index, total, harvested, fast=False):
                     parts = url.split("dash.cloudflare.com/")
                     if len(parts) > 1:
                         aid = parts[1].split("/")[0].split("?")[0]
-                        if len(aid) > 10:
-                            account_id = aid; page = t; break
+                        if len(aid) == 32 and all(c in '0123456789abcdef' for c in aid):
+                            account_id = aid; break
             except: continue
 
         if not account_id:
             page.get("https://dash.cloudflare.com/")
             time.sleep(3 if fast else 4)
-            parts = page.url.split("dash.cloudflare.com/")
+            cur_url = page.url or ""
+            parts = cur_url.split("dash.cloudflare.com/")
             if len(parts) > 1:
                 aid = parts[1].split("/")[0].split("?")[0]
-                if len(aid) > 10:
+                if len(aid) == 32 and all(c in '0123456789abcdef' for c in aid):
                     account_id = aid
 
         if not account_id:
@@ -223,7 +225,7 @@ def harvest_one(account, index, total, harvested, fast=False):
         print(f" [ERROR] {email}: {e}")
         return False
     finally:
-        try: page.quit()
+        try: main_page.quit()
         except: pass
 
 

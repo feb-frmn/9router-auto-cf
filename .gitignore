@@ -8,3 +8,5 @@ harvest_run.log
 *.bak
 akun.txt.real
 sessions/
+signup_tempmail.py
+tempmail_accounts.txt

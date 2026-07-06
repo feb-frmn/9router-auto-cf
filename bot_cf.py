@@ -121,18 +121,18 @@ def harvest_cf(account, index, total):
         try:
             page.get("https://dash.cloudflare.com/logout")
             time.sleep(random.uniform(2.0, 3.0))
-        except:
+        except Exception:
             pass
         # Clear semua cookies (CF + Google) biar OAuth mulai fresh
         try:
             page.set.cookies.clear()
-        except:
+        except Exception:
             pass
         try:
             page.get("https://accounts.google.com/Logout")
             time.sleep(random.uniform(2.0, 3.0))
             page.set.cookies.clear()
-        except:
+        except Exception:
             pass
 
         # ── [1] Login Cloudflare ──
@@ -302,7 +302,10 @@ def harvest_cf(account, index, total):
         print(f" [ERROR] {email}: {e}")
         return False
     finally:
-        main_page.quit()
+        try:
+            main_page.quit()
+        except Exception:
+            pass
 
 def main():
     print(f"\n{'='*55}")

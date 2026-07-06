@@ -106,7 +106,7 @@ def login_account(account, index, total, proxy=None, fast=False):
     co.set_argument("--disable-gpu")
     co.set_argument("--disable-dev-shm-usage")
     co.set_argument(f"--user-data-dir={profile_dir}")
-    port = 9300 + (index % 100)
+    port = 9300 + index
     co.set_local_port(port)
     if proxy:
         co.set_argument(f"--proxy-server={proxy}")
