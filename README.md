@@ -117,3 +117,10 @@ user2@example.com|password2
 - **Session lifetime** — Google cookies tahan weeks-months dengan profile persist
 - **PKCE detection** — harvest_http.py auto-deteksi dan kasih pesan jelas kalau kena PKCE
 - **cfut_ tokens are permanent** — sekali harvest, gak perlu login ulang
+
+
+## ☕ Support
+
+Kalau bot ini membantu, bisa traktir kopi:
+
+[![Saweria](https://img.shields.io/badge/Saweria-ffb13b?style=for-the-badge&logo=ko-fi&logoColor=white)](https://saweria.co/febfrmn)
