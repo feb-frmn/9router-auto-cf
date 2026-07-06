@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-harvest_hybrid.py — FASE 2A: Hybrid harvest
-Login via browser (silent, no BotGuard — profile udah authenticated dari login_capture.py)
+harvest_hybrid.py v2 — Silent OAuth harvest
+Login via browser (profile persisted from login_capture.py)
 → OAuth CF silent redirect → grab account_id + create token via CF internal API
-→ simpan ke cf_keys.txt + inject 9router
+→ save to cf_keys.txt + inject 9router
 
-Kenapa hybrid bukan murni-HTTP:
-- CF mungkin pakai PKCE (code_verifier dibuat di JS) → gak bisa replay HTTP
-- CSRF header name rotate antar versi dash
-- OAuth authorize step gak kena BotGuard kalau profile udah login Google (silent)
-- Browser step ini CEPET (<10s/akun) — gak ngetik password, langsung redirect
-
-Untuk murni-HTTP OAuth, gunakan harvest_http.py (eksperimental, mungkin kena PKCE).
+Usage:
+  python3 harvest_hybrid.py              # normal speed
+  python3 harvest_hybrid.py --fast       # fast mode (minimal delays)
+  python3 harvest_hybrid.py --delay 3    # custom delay between accounts
+  python3 harvest_hybrid.py --only user@jujusa.my.id  # single account
 """
-import os, sys, json, time, random
+import os, sys, json, time, random, argparse
 from pathlib import Path
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -24,6 +22,19 @@ PROFILE_ROOT = SCRIPT_DIR / ".chrome_profiles"
 SESSION_DIR  = SCRIPT_DIR / "sessions"
 
 MODELS = '["@cf/zai-org/glm-5.2","@cf/deepseek-ai/deepseek-r1-distill-qwen-32b","@cf/meta/llama-3.3-70b-instruct-fp8-fast","@cf/qwen/qwen2.5-coder-32b-instruct","@cf/qwen/qwq-32b"]'
+
+BANNER = f"""
+\033[36m╔══════════════════════════════════════════════════════╗
+║  \033[1;37m☁️  CF Workers AI Harvester v2\033[0;36m                       ║
+║  \033[2mSilent OAuth · Auto Token · 9Router Inject\033[0;36m           ║
+╚══════════════════════════════════════════════════════╝\033[0m
+  \033[2m☕ https://saweria.co/febfrmn\033[0m
+"""
+
+FAST_DELAY = (2, 4)     # delay between steps in fast mode
+NORM_DELAY = (3, 5)     # delay between steps in normal mode
+FAST_ACCOUNT_DELAY = (3, 6)   # delay between accounts in fast mode
+NORM_ACCOUNT_DELAY = (8, 15)  # delay between accounts in normal mode
 
 
 def read_accounts():
@@ -73,9 +84,10 @@ def create_token(page, account_id, perm_ids):
     return None
 
 
-def harvest_one(account, index, total, harvested):
+def harvest_one(account, index, total, harvested, fast=False):
     email    = account["email"]
     password = account["password"]
+    delays = FAST_DELAY if fast else NORM_DELAY
     print(f"\n{'='*55}\n [{index}/{total}] {email}\n{'='*55}")
 
     safe = email.replace("@","_at_").replace(".","_")
@@ -88,30 +100,31 @@ def harvest_one(account, index, total, harvested):
     co.set_argument("--no-sandbox"); co.set_argument("--disable-gpu")
     co.set_argument("--disable-dev-shm-usage")
     co.set_argument(f"--user-data-dir={profile_dir}")
-    co.set_local_port(9400 + index)
+    # Unique port per account (avoid conflicts)
+    port = 9400 + (index % 100)
+    co.set_local_port(port)
     page = ChromiumPage(co)
 
     try:
-        # === LOGIN CHECK — kalau profile udah punya session Google, OAuth CF jadi silent ===
-        print(" [1] Buka CF login...")
+        # Step 1: Check CF session
+        print(" [1] Opening CF login...")
         page.get("https://dash.cloudflare.com/login")
-        time.sleep(random.uniform(3.0, 5.0))
+        time.sleep(random.uniform(*delays))
 
-        # Udah login CF? (profile sebelumnya)
         if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
-            print("    ✅ CF session masih aktif (dari profile persist)")
+            print("    ✅ CF session active (persisted profile)")
         else:
-            # Klik Continue with Google
-            print(" [2] OAuth Google (harusnya silent jika Google session aktif)...")
+            # Step 2: OAuth Google (silent if Google session active)
+            print(" [2] Google OAuth (silent if session active)...")
             btn = page.ele("@text():Google", timeout=8)
             if not btn:
-                raise Exception("Tombol Google gak ketemu")
+                raise Exception("Google button not found")
 
             tabs_before = set(page.tab_ids)
             btn.click()
-            time.sleep(random.uniform(3.0, 5.0))
+            time.sleep(random.uniform(*delays))
 
-            # Cari tab Google OAuth
+            # Find Google OAuth tab
             new_tab_id = None
             for _ in range(6):
                 new_tabs = set(page.tab_ids) - tabs_before
@@ -128,39 +141,34 @@ def harvest_one(account, index, total, harvested):
 
             if new_tab_id:
                 tab = page.get_tab(new_tab_id)
-                time.sleep(random.uniform(2.0, 4.0))
+                time.sleep(random.uniform(2.0, 3.0))
                 cur_url = tab.url or ""
 
                 if "accounts.google.com" in cur_url:
-                    # Consent sudah granted → harusnya auto-redirect
-                    # Kalau muncul consent screen, klik Allow
                     allow = tab.ele("@text():Allow", timeout=5)
                     if allow:
                         allow.click()
-                        time.sleep(random.uniform(2.0, 4.0))
+                        time.sleep(random.uniform(2.0, 3.0))
 
-                    # Kalau masih di Google (account chooser), klik akun
                     if "accounts.google.com" in (tab.url or ""):
                         acct_btn = tab.ele(f"@data-email:{email}", timeout=3)
                         if acct_btn:
                             acct_btn.click()
-                            time.sleep(random.uniform(2.0, 3.0))
+                            time.sleep(random.uniform(1.5, 2.5))
                         else:
-                            # Harus login (session expired), fall back ke DrissionPage login
-                            print("    ⚠️  Google session expired — perlu re-login")
-                            print("       Jalankan: python3 login_capture.py --only", email)
-                            raise Exception("Google session expired — re-run login_capture.py")
+                            print("    ⚠️  Google session expired — re-run login_capture.py")
+                            raise Exception("Google session expired")
 
-            # Tunggu redirect ke CF dashboard
-            print(" [3] Tunggu redirect ke CF dashboard...")
+            # Wait for CF dashboard redirect
+            print(" [3] Waiting for CF dashboard redirect...")
             for _ in range(15):
-                time.sleep(2)
+                time.sleep(1 if fast else 2)
                 if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
                     break
             if "/login" in page.url:
-                raise Exception("Redirect ke CF dashboard gagal")
+                raise Exception("Redirect to CF dashboard failed")
 
-        # === AMBIL ACCOUNT ID ===
+        # Step 4: Get account ID
         account_id = None
         for tid in page.tab_ids:
             try:
@@ -176,7 +184,7 @@ def harvest_one(account, index, total, harvested):
 
         if not account_id:
             page.get("https://dash.cloudflare.com/")
-            time.sleep(4)
+            time.sleep(3 if fast else 4)
             parts = page.url.split("dash.cloudflare.com/")
             if len(parts) > 1:
                 aid = parts[1].split("/")[0].split("?")[0]
@@ -184,25 +192,26 @@ def harvest_one(account, index, total, harvested):
                     account_id = aid
 
         if not account_id:
-            raise Exception(f"Gagal ambil account_id. URL: {page.url}")
+            raise Exception(f"Failed to get account_id. URL: {page.url}")
         print(f" [4] Account ID: {account_id}")
 
-        # SKIP kalau udah di-harvest
+        # Skip if already harvested
         if account_id in harvested:
-            print(f" [SKIP] Udah ada di cf_keys.txt")
+            print(f" [SKIP] Already in cf_keys.txt")
             return True
 
-        # === BUAT TOKEN ===
-        print(" [5] Ambil Workers AI permissions...")
+        # Step 5: Get Workers AI permissions
+        print(" [5] Getting Workers AI permissions...")
         perm_ids = get_wa_perms(page)
         if not perm_ids:
-            raise Exception("Gagal ambil permission groups")
+            raise Exception("Failed to get permission groups")
         print(f"    {len(perm_ids)} perms: {[p['name'] for p in perm_ids]}")
 
-        print(" [6] Buat API token...")
+        # Step 6: Create API token
+        print(" [6] Creating API token...")
         token = create_token(page, account_id, perm_ids)
         if not token:
-            raise Exception("API gagal bikin token")
+            raise Exception("API failed to create token")
 
         base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
         with open(RESULT_FILE, "a") as f:
@@ -219,22 +228,41 @@ def harvest_one(account, index, total, harvested):
 
 
 def main():
+    print(BANNER)
+    ap = argparse.ArgumentParser(description="CF Workers AI Token Harvester v2")
+    ap.add_argument("--fast", action="store_true", help="Fast mode (minimal delays)")
+    ap.add_argument("--delay", type=int, default=None, help="Custom delay between accounts (seconds)")
+    ap.add_argument("--only", help="Harvest single account only")
+    args = ap.parse_args()
+
     accounts = read_accounts()
+    if args.only:
+        accounts = [a for a in accounts if a["email"] == args.only]
     if not accounts:
-        print("Isi akun.txt"); sys.exit(1)
+        print("❌ Add accounts to akun.txt (email|password per line)")
+        sys.exit(1)
 
     harvested = get_harvested()
-    print(f"Total akun: {len(accounts)} | Udah di-harvest: {len(harvested)}")
+    print(f"Total accounts: {len(accounts)} | Already harvested: {len(harvested)}")
+    if args.fast:
+        print("⚡ Fast mode enabled\n")
 
     ok = 0
     for i, acc in enumerate(accounts, 1):
-        if harvest_one(acc, i, len(accounts), harvested):
+        if harvest_one(acc, i, len(accounts), harvested, fast=args.fast):
             ok += 1
         if i < len(accounts):
-            d = random.randint(8, 15)
-            print(f"\nTunggu {d}s..."); time.sleep(d)
+            if args.delay is not None:
+                d = args.delay
+            elif args.fast:
+                d = random.randint(*FAST_ACCOUNT_DELAY)
+            else:
+                d = random.randint(*NORM_ACCOUNT_DELAY)
+            print(f"\n  Waiting {d}s...")
+            time.sleep(d)
 
-    print(f"\n{'='*55}\n DONE: {ok}/{len(accounts)} berhasil\n{'='*55}")
+    print(f"\n{'='*55}\n DONE: {ok}/{len(accounts)} successful\n{'='*55}")
+    print(f"  ☕ https://saweria.co/febfrmn\n")
 
 
 if __name__ == "__main__":
