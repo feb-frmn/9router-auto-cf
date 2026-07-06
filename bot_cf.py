@@ -147,7 +147,7 @@ def harvest_cf(account, index, total):
             print("    ⚠️  Masih ada session — clear cookies lagi & reload login")
             try:
                 page.set.cookies.clear()
-            except:
+            except Exception:
                 pass
             page.get("https://dash.cloudflare.com/login")
             time.sleep(random.uniform(3.0, 5.0))
@@ -179,7 +179,7 @@ def harvest_cf(account, index, total):
                         if "accounts.google.com" in (t.url or ""):
                             new_tab_id = tid
                             break
-                    except:
+                    except Exception:
                         continue
             if not new_tab_id:
                 raise Exception("Tab Google OAuth gak muncul")
@@ -253,7 +253,7 @@ def harvest_cf(account, index, total):
                             account_id = aid
                             page = t
                             break
-            except:
+            except Exception:
                 continue
         
         if not account_id:
