@@ -305,6 +305,11 @@ def harvest_cf(account, index, total):
         main_page.quit()
 
 def main():
+    print(f"\n{'='*55}")
+    print(f" Cloudflare Workers AI Farmer")
+    print(f"{'='*55}")
+    print(f" ☕ Support: https://saweria.co/febfrmn\n")
+
     # Handle --clean flag
     if "--clean" in sys.argv:
         if os.path.exists(RESULT_FILE):
