@@ -86,7 +86,7 @@ def add_connection(api_key, account_id, name, dry_run=False):
         body = e.read().decode()
         try:
             msg = json.loads(body).get("error", body[:100])
-        except:
+        except Exception:
             msg = body[:100]
         return False, msg
     except Exception as e:

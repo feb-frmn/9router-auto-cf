@@ -318,7 +318,7 @@ def harvest_http_one(email):
                 headers={**CF_HEADERS, "Accept": "application/json"},
                 cookies=cf_cookies)
     perm_data = r8.json().get("result", [])
-    perm_ids = [{"id": g["id"], "name": g["name"]}
+    perm_ids = [{"id": g["id"]}
                 for g in perm_data if "workers ai" in g.get("name","").lower()]
     if not perm_ids:
         raise Exception("Gagal ambil Workers AI permission groups")

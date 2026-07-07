@@ -65,10 +65,12 @@ def get_wa_perms(page):
 
 
 def create_token(page, account_id, perm_ids):
+    # CF API expects permission_groups as [{"id": "..."}] — extra fields can cause 400
+    clean_perms = [{"id": p["id"]} for p in perm_ids]
     payload = json.dumps({
         "name": f"cf-ai-{int(time.time())}",
         "policies": [{"effect": "allow",
-                      "permission_groups": perm_ids,
+                      "permission_groups": clean_perms,
                       "resources": {f"com.cloudflare.api.account.{account_id}": "*"}}]
     })
     result = page.run_js("""return (async()=>{
@@ -138,7 +140,7 @@ def harvest_one(account, index, total, harvested, fast=False):
                         t = page.get_tab(tid)
                         if "accounts.google.com" in (t.url or ""):
                             new_tab_id = tid; break
-                    except: continue
+                    except Exception: continue
 
             if new_tab_id:
                 tab = page.get_tab(new_tab_id)
@@ -181,7 +183,7 @@ def harvest_one(account, index, total, harvested, fast=False):
                         aid = parts[1].split("/")[0].split("?")[0]
                         if len(aid) == 32 and all(c in '0123456789abcdef' for c in aid):
                             account_id = aid; break
-            except: continue
+            except Exception: continue
 
         if not account_id:
             page.get("https://dash.cloudflare.com/")
@@ -226,7 +228,7 @@ def harvest_one(account, index, total, harvested, fast=False):
         return False
     finally:
         try: main_page.quit()
-        except: pass
+        except Exception: pass
 
 
 def main():
