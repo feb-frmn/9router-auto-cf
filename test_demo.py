@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-test_demo.py — Audit & demo test suite untuk Cloudflare Workers AI Farmer.
+test_demo.py — Audit & test suite for CF Workers AI Farmer (Pure API).
 
 Tests:
-  1. Syntax check     — semua file Python valid
-  2. Import check     — dependency terinstall
-  3. Logic check      — fungsi inti behavior benar
-  4. Token format     — cf_keys.txt format valid
-  5. Permission fix   — verify clean_perms (no 'name' field leak)
-  6. Bare except      — no bare except: clauses
-  7. Anti-ban check   — fingerprint + trace removal + human delay
-  8. Proxy support    — per-account + global proxy
-  9. GSuite support   — Workspace TOS + Account Chooser
-  10. Neuron tracking — cf_proxy.py estimation logic
-  11. End-to-end demo — mock harvest + proxy flow
+  1. Syntax check      — all Python files valid
+  2. Import check      — requests installed (no browser deps)
+  3. Logic check       — read_accounts, get_harvested, make_session
+  4. Token format      — cf_keys.txt format valid
+  5. Permission fix    — clean_perms (only id field sent)
+  6. Bare except       — no bare except: clauses
+  7. Anti-detection    — random UA, session cookies, proxy support
+  8. Proxy support     — per-account + global proxy
+  9. No browser deps   — no DrissionPage, Playwright, Selenium imports
+  10. Neuron tracking  — cf_proxy.py estimation logic
+  11. End-to-end mock  — mock harvest + proxy flow
 
 Usage:
   python3 test_demo.py              # all tests
-  python3 test_demo.py --quick      # skip browser tests
   python3 test_demo.py --verbose    # show all output
 """
 
-import os, sys, json, re, time, argparse, inspect
+import os, sys, json, re, time, argparse
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -63,12 +62,23 @@ def test_syntax():
 def test_imports():
     print("\n📋 2. Import Check")
     print("   " + "─" * 50)
-    for label, module in [("DrissionPage", "DrissionPage"), ("requests", "requests")]:
+    for label, module in [("requests", "requests"), ("urllib3", "urllib3")]:
         try:
             __import__(module)
             result(f"Import: {label}", True)
         except ImportError as e:
             result(f"Import: {label}", False, str(e))
+
+    # Verify NO browser deps are imported by cf_farmer
+    fpath = SCRIPT_DIR / "cf_farmer.py"
+    if fpath.exists():
+        content = fpath.read_text()
+        for dep in ["DrissionPage", "playwright", "selenium"]:
+            has_import = bool(re.search(rf'(?:from|import)\s+{dep}', content))
+            result(f"No browser dep: {dep} not imported by cf_farmer", not has_import,
+                   f"Imported!" if has_import else "Not imported — pure API")
+    else:
+        skipped("cf_farmer.py not found")
 
 # ─── 3. LOGIC CHECK ───────────────────────────────────────────────────────────
 def test_logic():
@@ -76,11 +86,10 @@ def test_logic():
     print("   " + "─" * 50)
     try:
         import cf_farmer
-        from pathlib import Path as P
         tmp = SCRIPT_DIR / ".test_akun.txt"
         tmp.write_text("test@gmail.com|pass123\nbad_entry\nuser@company.com|p455|http://proxy:8080\n")
         old = cf_farmer.AKUN_FILE
-        cf_farmer.AKUN_FILE = P(str(tmp))
+        cf_farmer.AKUN_FILE = tmp
         accounts = cf_farmer.read_accounts()
         cf_farmer.AKUN_FILE = old
         tmp.unlink()
@@ -92,14 +101,13 @@ def test_logic():
 
     try:
         import cf_farmer
-        from pathlib import Path as P
         tmp = SCRIPT_DIR / ".test_cf_keys.txt"
         tmp.write_text(
             "cloudflare_abc|https://api.cloudflare.com/client/v4/accounts/abc123def456/ai/v1|cfut_tok|[]\n"
             "cloudflare_xyz|https://api.cloudflare.com/client/v4/accounts/xyz789aaa/ai/v1|cfut_tok2|[]\n"
         )
         old = cf_farmer.RESULT_FILE
-        cf_farmer.RESULT_FILE = P(str(tmp))
+        cf_farmer.RESULT_FILE = tmp
         harvested = cf_farmer.get_harvested()
         cf_farmer.RESULT_FILE = old
         tmp.unlink()
@@ -107,6 +115,25 @@ def test_logic():
         result("get_harvested: dedup set", ok, f"Got {harvested}" if not ok else f"{len(harvested)} unique")
     except Exception as e:
         result("get_harvested: dedup set", False, str(e))
+
+    try:
+        import cf_farmer
+        s = cf_farmer.make_session()
+        ua = s.headers.get("User-Agent", "")
+        ok = "Chrome" in ua and "Mozilla" in ua
+        result("make_session: UA + headers", ok, f"UA: {ua[:40]}" if not ok else "Session created with anti-detection headers")
+        s.close()
+    except Exception as e:
+        result("make_session: UA + headers", False, str(e))
+
+    try:
+        import cf_farmer
+        s = cf_farmer.make_session(proxy="http://127.0.0.1:8080")
+        ok = s.proxies.get("https") == "http://127.0.0.1:8080"
+        result("make_session: proxy support", ok)
+        s.close()
+    except Exception as e:
+        result("make_session: proxy support", False, str(e))
 
     try:
         import cf_proxy
@@ -135,15 +162,15 @@ def test_token_format():
 def test_permission_fix():
     print("\n📋 5. Permission Groups Fix Check")
     print("   " + "─" * 50)
-    for fname in ["cf_farmer.py"]:
-        fpath = SCRIPT_DIR / fname
-        if not fpath.exists():
-            skipped(f"{fname}: not found"); continue
-        content = fpath.read_text()
-        has_clean = bool(re.search(r'clean_perms\s*=\s*\[\{"id"', content))
-        sends_raw = '"permission_groups": perm_ids' in content
-        ok = has_clean and not sends_raw
-        result(f"{fname}: clean_perms fix", ok, "Only sends id field" if ok else "Still raw")
+    fpath = SCRIPT_DIR / "cf_farmer.py"
+    if not fpath.exists():
+        skipped("cf_farmer.py: not found"); return
+    content = fpath.read_text()
+    # Check that only {"id": ...} is sent, not raw perm_ids with name
+    has_clean = bool(re.search(r'permission_groups.*\[\{"id"', content))
+    sends_raw = '"permission_groups": perm_ids' in content
+    ok = has_clean and not sends_raw
+    result("cf_farmer.py: clean_perms fix", ok, "Only sends id field" if ok else "Still raw")
 
 # ─── 6. BARE EXCEPT ───────────────────────────────────────────────────────────
 def test_no_bare_except():
@@ -155,9 +182,9 @@ def test_no_bare_except():
         result(f"{f.name}: no bare except", len(bare) == 0,
                f"{len(bare)} found" if bare else "All Exception")
 
-# ─── 7. ANTI-BAN CHECK ────────────────────────────────────────────────────────
-def test_anti_ban():
-    print("\n📋 7. Anti-Ban Check")
+# ─── 7. ANTI-DETECTION ────────────────────────────────────────────────────────
+def test_anti_detection():
+    print("\n📋 7. Anti-Detection Check (Pure API)")
     print("   " + "─" * 50)
     fpath = SCRIPT_DIR / "cf_farmer.py"
     if not fpath.exists():
@@ -165,37 +192,46 @@ def test_anti_ban():
     content = fpath.read_text()
 
     checks = [
-        ("Fingerprint randomization", "random_fingerprint" in content and "USER_AGENTS" in content),
-        ("Human typing delays", "human_type" in content and "random.uniform" in content),
-        ("Human click delays", "human_click" in content),
-        ("Trace removal (wipe_profile_traces)", "wipe_profile_traces" in content),
-        ("Cookie clearing", "cookies.clear()" in content),
-        ("Random window sizes", "WINDOW_SIZES" in content),
-        ("Random user agents", "USER_AGENTS" in content),
-        ("Profile per account (hash)", "profile_hash" in content or "md5" in content),
-        ("Session logout before login", "cloudflare.com/logout" in content),
-        ("Headless mode (--headless=new)", "--headless=new" in content),
+        ("Random user agents (USER_AGENTS)", "USER_AGENTS" in content),
+        ("random_ua() function", "def random_ua" in content),
+        ("Session cookie persistence", "requests.Session()" in content),
+        ("sec-ch-ua header spoofing", "sec-ch-ua" in content),
+        ("sec-fetch headers", "sec-fetch" in content),
+        ("Accept-Language header", "Accept-Language" in content),
+        ("Retry on 429/5xx", "status_forcelist" in content),
+        ("Session close (cleanup)", "session.close()" in content),
+        ("No browser imports", "DrissionPage" not in content and "playwright" not in content and "selenium" not in content),
+        ("No headless args", "--headless" not in content),
+        ("No Chrome profile dirs", "chrome_profiles" not in content and "user-data-dir" not in content),
     ]
     for name, ok in checks:
-        result(f"Anti-ban: {name}", ok)
+        result(f"Anti-detection: {name}", ok)
 
-    # 7b. CF Signup Check
-    print("\n📋 7b. CF Signup Check")
+    # 7b. API Flow Check
+    print("\n📋 7b. API Flow Check")
     print("   " + "─" * 50)
     checks = [
-        ("cf_signup function", "def cf_signup" in content),
-        ("CF signup URL (dash.cloudflare.com/sign-up)", "dash.cloudflare.com/sign-up" in content),
-        ("Email field detection", "tag:input@type=email" in content),
-        ("Password field detection", "tag:input@type=password" in content),
-        ("Submit button detection", "@type=submit" in content),
-        ("Email verification wait", "verify" in content.lower() and "180" in content),
-        ("Auto-fallback to CF login", "cf_login_email" in content),
-        ("Auto-fallback to Google OAuth", "cf_login_google" in content),
-        ("Signup → login → Google OAuth chain", "cf_signup" in content and "cf_login_email" in content and "cf_login_google" in content),
-        ("akun.txt input (user provides email)", "read_accounts" in content and "email|password" not in content or "parts[0]" in content),
+        ("cf_login function (API)", "def cf_login" in content),
+        ("POST /api/v4/login", "/api/v4/login" in content or 'f"{API_BASE}/login"' in content),
+        ("GET /api/v4/accounts", "/accounts" in content),
+        ("GET permission_groups", "permission_groups" in content),
+        ("POST /api/v4/user/tokens", "/user/tokens" in content),
+        ("create_token function", "def create_token" in content),
+        ("get_account_id function", "def get_account_id" in content),
+        ("get_permission_groups function", "def get_permission_groups" in content),
+        ("save_token function", "def save_token" in content),
+        ("harvest_one function", "def harvest_one" in content),
+        ("No cf_signup (removed — pure login)", "def cf_signup" not in content),
+        ("No cf_login_google (removed)", "def cf_login_google" not in content),
+        ("No cf_login_email (removed)", "def cf_login_email" not in content),
+        ("No extract_account_id from browser", "def extract_account_id" not in content or "page.tab_ids" not in content),
+        ("No human_type (browser typing)", "def human_type" not in content),
+        ("No human_click (browser click)", "def human_click" not in content),
+        ("No setup_browser (browser launch)", "def setup_browser" not in content),
+        ("No wipe_profile_traces", "def wipe_profile_traces" not in content),
     ]
     for name, ok in checks:
-        result(f"Signup: {name}", ok)
+        result(f"API Flow: {name}", ok)
 
 # ─── 8. PROXY SUPPORT ─────────────────────────────────────────────────────────
 def test_proxy():
@@ -208,28 +244,26 @@ def test_proxy():
     checks = [
         ("Global --proxy flag", "--proxy" in content and "global_proxy" in content),
         ("Per-account proxy (akun.txt)", '"proxy"' in content and 'parts[2]' in content),
-        ("Chromium --proxy-server arg", "--proxy-server" in content),
-        ("Proxy displayed in output", 'Proxy:' in content),
+        ("requests session proxy", "s.proxies" in content),
+        ("Proxy displayed in output", "Proxy:" in content or "proxy" in content.lower()),
+        ("No Chrome --proxy-server arg", "--proxy-server" not in content),
     ]
     for name, ok in checks:
         result(f"Proxy: {name}", ok)
 
-# ─── 9. GSUITE ────────────────────────────────────────────────────────────────
-def test_gsuite():
-    print("\n📋 9. GSuite Support Check")
+# ─── 9. NO BROWSER DEPS ───────────────────────────────────────────────────────
+def test_no_browser():
+    print("\n📋 9. No Browser Dependencies Check")
     print("   " + "─" * 50)
-    fpath = SCRIPT_DIR / "cf_farmer.py"
-    if not fpath.exists():
-        skipped("cf_farmer.py not found"); return
-    content = fpath.read_text()
-    checks = [
-        ("Workspace TOS handling", "workspacetermsofservice" in content or "speedbump" in content),
-        ("Account Chooser", "accountchooser" in content),
-        ("Google OAuth flow", '@text():Google' in content),
-        ("Domain-agnostic (email|password)", "loginId" not in content),
-    ]
-    for name, ok in checks:
-        result(f"GSuite: {name}", ok)
+    for f in sorted(SCRIPT_DIR.glob("*.py")):
+        if f.name == "test_demo.py": continue
+        content = f.read_text()
+        browser_imports = []
+        for dep in ["DrissionPage", "playwright", "selenium", "pyppeteer"]:
+            if re.search(rf'(?:from|import)\s+{dep}', content):
+                browser_imports.append(dep)
+        result(f"{f.name}: no browser imports", len(browser_imports) == 0,
+               f"Found: {browser_imports}" if browser_imports else "Pure API")
 
 # ─── 10. NEURON TRACKING ──────────────────────────────────────────────────────
 def test_neuron_tracking():
@@ -240,7 +274,6 @@ def test_neuron_tracking():
         skipped("cf_proxy.py not found"); return
     try:
         import cf_proxy
-        # Test estimation
         n = cf_proxy.estimate_neurons("@cf/meta/llama-3.2-1b-instruct", 1e6, 1e6)
         expected = 2457 + 18252
         result("Neuron estimation: known model", abs(n - expected) < 0.01,
@@ -278,36 +311,35 @@ def test_e2e_mock():
     print("   " + "─" * 50)
     try:
         import cf_farmer
-        # Verify MODELS is valid JSON
         models = json.loads(cf_farmer.MODELS)
         result("Mock: MODELS valid JSON", isinstance(models, list) and len(models) > 0,
                f"{len(models)} models")
 
-        # Verify output format
         fake_id = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
         line = f"cloudflare_{fake_id[:6]}|https://api.cloudflare.com/client/v4/accounts/{fake_id}/ai/v1|cfut_FAKE|{cf_farmer.MODELS}"
         parts = line.split("|")
         result("Mock: output format", len(parts) == 4 and parts[2].startswith("cfut_"),
                f"{len(parts)} parts")
 
-        # Verify fingerprint function returns dict
-        fp = cf_farmer.random_fingerprint()
-        result("Mock: fingerprint generation",
-               "user_agent" in fp and "window_size" in fp,
-               f"keys: {list(fp.keys())}")
+        # Verify make_session returns a proper session
+        s = cf_farmer.make_session()
+        result("Mock: make_session creates session", hasattr(s, "post") and hasattr(s, "get"))
+        s.close()
+
+        # Verify random_ua returns a string
+        ua = cf_farmer.random_ua()
+        result("Mock: random_ua returns string", isinstance(ua, str) and "Chrome" in ua,
+               f"UA: {ua[:40]}")
     except Exception as e:
         result("Mock: import cf_farmer", False, str(e))
 
     try:
         import cf_proxy
-        # Verify DB init
         tmp_db = SCRIPT_DIR / ".test_proxy.db"
         db = cf_proxy.init_db(tmp_db)
         result("Mock: DB init", db is not None)
-        # Verify pool
         p = cf_proxy.AccountPool(db)
         result("Mock: AccountPool creation", p is not None)
-        # Stats with empty pool
         s = p.stats()
         result("Mock: stats on empty pool", s["total"] == 0)
         tmp_db.unlink()
@@ -317,14 +349,14 @@ def test_e2e_mock():
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     global VERBOSE
-    parser = argparse.ArgumentParser(description="CF Bot Test Suite")
+    parser = argparse.ArgumentParser(description="CF Bot Test Suite (Pure API)")
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     VERBOSE = args.verbose
 
     print("\n  ╔═══════════════════════════════════════════════╗")
-    print("  ║  CF Workers AI Farmer — Test Suite (v2)       ║")
+    print("  ║  CF Workers AI Farmer — Test Suite (v2.1 API) ║")
     print("  ╚═══════════════════════════════════════════════╝")
     print(f"  Directory: {SCRIPT_DIR}")
     print()
@@ -335,9 +367,9 @@ def main():
     test_token_format()
     test_permission_fix()
     test_no_bare_except()
-    test_anti_ban()
+    test_anti_detection()
     test_proxy()
-    test_gsuite()
+    test_no_browser()
     test_neuron_tracking()
     test_e2e_mock()
 
