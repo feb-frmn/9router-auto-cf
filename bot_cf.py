@@ -65,12 +65,16 @@ def get_wa_permission_ids(page):
     return ids
 
 def create_token_via_api(page, account_id, perm_ids):
-    """Create API token via CF internal API (browser session)."""
+    """Create API token via CF internal API (browser session).
+    perm_ids: list of dicts with 'id' and 'name' — we only send 'id' to CF API.
+    """
+    # CF API expects permission_groups as [{"id": "..."}] — extra fields can cause 400
+    clean_perms = [{"id": p["id"]} for p in perm_ids]
     payload = json.dumps({
         "name": f"cf-ai-{int(time.time())}",
         "policies": [{
             "effect": "allow",
-            "permission_groups": perm_ids,
+            "permission_groups": clean_perms,
             "resources": {f"com.cloudflare.api.account.{account_id}": "*"}
         }]
     })
