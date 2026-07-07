@@ -1,7 +1,0 @@
-# Add your Cloudflare accounts here, one per line.
-# Format: email|password
-# 
-# Example:
-# user1@gmail.com|yourpassword
-# user2@gmail.com|yourpassword
-# admin@yourcompany.com|yourpassword

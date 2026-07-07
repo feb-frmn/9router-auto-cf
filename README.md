@@ -1,78 +1,97 @@
 # Cloudflare Workers AI Farmer
 
-Automated Cloudflare Workers AI token harvester — login via Google OAuth (Gmail or GSuite), extract account ID, and create API tokens for 9Router injection.
-
-## Features
-
-- ✅ Google OAuth login (works with **@gmail.com** AND **GSuite custom domains**)
-- ✅ Handles Google Workspace TOS screen + Account Chooser
-- ✅ Human-like typing & clicking (anti-bot detection)
-- ✅ Per-account browser profile (no session bleed)
-- ✅ Auto-dedup (skip already-harvested accounts)
-- ✅ Injects tokens into 9Router automatically
+Automated Cloudflare Workers AI token harvester + inference proxy with anti-ban protection and neuron budget tracking.
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
-pip install DrissionPage curl_cffi requests
+# 1. Install
+pip install DrissionPage requests
 
-# 2. Add accounts
-cp akun.txt.example akun.txt
-echo "your_email@gmail.com|your_password" >> akun.txt
+# 2. Add accounts (email|password or email|password|proxy)
+echo "your@gmail.com|yourpassword" > akun.txt
 
 # 3. Harvest tokens
-python3 bot_cf.py
+python3 cf_farmer.py
 
-# 4. Inject into 9Router
-python3 inject_9router.py
+# 4. Start inference proxy
+python3 cf_proxy.py
+
+# 5. Run audit tests
+python3 test_demo.py --verbose
 ```
 
-## GSuite / Custom Domain Support
+## Two Tools, One Pipeline
 
-The bot works with **any** Google account:
-- `@gmail.com` — standard Gmail
-- `@yourcompany.com` — GSuite / Google Workspace
+### 1. cf_farmer.py — Token Harvester
 
-It handles:
-- Workspace TOS ("I understand" button)
-- Account Chooser ("Use another account")
-- Google consent screens (Allow/Continue/Accept)
-
-## Test Suite
-
-Run the audit test suite to verify everything is working:
+Harvests Cloudflare Workers AI API tokens via Google OAuth.
 
 ```bash
-# Full test (includes browser + 9Router checks)
-python3 test_demo.py --verbose
-
-# Quick test (skip browser/network tests)
-python3 test_demo.py --quick
+python3 cf_farmer.py                           # harvest all
+python3 cf_farmer.py --proxy http://ip:port    # global proxy
+python3 cf_farmer.py --only user@email.com    # single account
+python3 cf_farmer.py --clean                   # reset cf_keys.txt
+python3 cf_farmer.py --delay 30               # custom delay
 ```
 
-**Test categories:**
-1. Syntax check — all Python files compile
-2. Import check — all dependencies installed
-3. Logic check — core functions work correctly
-4. Token format — cf_keys.txt format valid
-5. Permission fix — clean_perms (no name field leak)
-6. Bare except — no bare except: clauses
-7. Browser check — Chromium + DrissionPage ready
-8. 9Router check — API endpoint reachable
-9. GSuite support — TOS/Chooser/OAuth handling verified
-10. End-to-end demo — mock harvest flow verified
+**akun.txt format:**
+```
+email|password
+email|password|http://proxy:port     # per-account proxy
+```
 
-## Architecture
+**Anti-ban features:**
+- Randomized browser fingerprint (user agent, window size, timezone)
+- Human-like typing & clicking delays
+- Profile trace removal after each account (cache, cookies, history)
+- Session logout before each login
+- Random delays between accounts
+- Per-account browser profile (no session bleed)
+- Only sends `id` field to CF API (no `name` leak = no 400)
 
-### Method 1: bot_cf.py (Recommended)
-Browser-based, full Google OAuth flow. One script does everything.
+**GSuite support:**
+- Works with `@gmail.com` AND custom domain GSuite
+- Handles Workspace TOS screen
+- Handles Account Chooser
+- Handles Google consent screens
 
-### Method 2: 2-Phase (For bulk harvesting)
-- `login_capture.py` — Phase 1: Login Google once per account, save cookies
-- `harvest_hybrid.py` — Phase 2A: Silent OAuth (fast, no password typing)
-- `harvest_http.py` — Phase 2B: Pure HTTP (experimental, may hit PKCE)
-- `inject_9router.py` — Inject all harvested tokens into 9Router
+### 2. cf_proxy.py — Inference Proxy
+
+OpenAI-compatible proxy that rotates across all harvested accounts.
+
+```bash
+python3 cf_proxy.py                    # start on port 8750
+python3 cf_proxy.py --port 9000       # custom port
+python3 cf_proxy.py --key mysecret    # API key auth
+python3 cf_proxy.py --import-9router  # import from 9Router DB
+```
+
+**Features:**
+- Round-robin account rotation (thread-safe, race-safe)
+- Neuron budget estimation per model (proactive skip before 429)
+- 429 auto-cooldown (90s rate limit, 00:00 UTC daily limit)
+- OpenAI-compatible: `/v1/chat/completions` + `/v1/models`
+- Streaming support (SSE)
+- CF passthrough: `/ai/run/:model` (image gen, TTS, etc)
+- Web dashboard at `http://localhost:8750/`
+- Import from cf_keys.txt OR 9Router DB
+
+**Neuron tracking:**
+```
+neurons ≈ prompt_tokens × rate_in + completion_tokens × rate_out
+```
+- Rates from CF pricing page per model
+- Unknown models → 70b-class fallback (skip early, don't overrun)
+- 10,000 free neurons/day per account
+- Reset at 00:00 UTC
+
+**9Router integration:**
+```
+Base URL: http://127.0.0.1:8750/v1
+API Key: (whatever you set with --key)
+Models: @cf/meta/llama-3.3-70b-instruct-fp8-fast, etc.
+```
 
 ## Output Format
 
@@ -80,6 +99,15 @@ Browser-based, full Google OAuth flow. One script does everything.
 ```
 cloudflare_abc123|https://api.cloudflare.com/client/v4/accounts/abc123.../ai/v1|cfut_TOKEN|["@cf/zai-org/glm-5.2",...]
 ```
+
+## Test Suite
+
+```bash
+python3 test_demo.py --verbose    # full (49 tests)
+python3 test_demo.py --quick      # skip browser tests
+```
+
+Categories: syntax, import, logic, token format, permission fix, bare except, anti-ban, proxy, GSuite, neuron tracking, E2E mock.
 
 ## ☕ Support
 

@@ -4,9 +4,9 @@ __pycache__/
 *.pyc
 .venv/
 .chrome_profiles/
-harvest_run.log
+data/
 *.bak
 akun.txt.real
 sessions/
-signup_tempmail.py
-tempmail_accounts.txt
+*.db
+.env
