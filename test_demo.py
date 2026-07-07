@@ -174,10 +174,28 @@ def test_anti_ban():
         ("Random user agents", "USER_AGENTS" in content),
         ("Profile per account (hash)", "profile_hash" in content or "md5" in content),
         ("Session logout before login", "cloudflare.com/logout" in content),
-        ("Google logout", "accounts.google.com/Logout" in content),
+        ("Headless mode (--headless=new)", "--headless=new" in content),
     ]
     for name, ok in checks:
         result(f"Anti-ban: {name}", ok)
+
+    # 7b. CF Signup Check
+    print("\n📋 7b. CF Signup Check")
+    print("   " + "─" * 50)
+    checks = [
+        ("cf_signup function", "def cf_signup" in content),
+        ("CF signup URL (dash.cloudflare.com/sign-up)", "dash.cloudflare.com/sign-up" in content),
+        ("Email field detection", "tag:input@type=email" in content),
+        ("Password field detection", "tag:input@type=password" in content),
+        ("Submit button detection", "@type=submit" in content),
+        ("Email verification wait", "verify" in content.lower() and "180" in content),
+        ("Auto-fallback to CF login", "cf_login_email" in content),
+        ("Auto-fallback to Google OAuth", "cf_login_google" in content),
+        ("Signup → login → Google OAuth chain", "cf_signup" in content and "cf_login_email" in content and "cf_login_google" in content),
+        ("akun.txt input (user provides email)", "read_accounts" in content and "email|password" not in content or "parts[0]" in content),
+    ]
+    for name, ok in checks:
+        result(f"Signup: {name}", ok)
 
 # ─── 8. PROXY SUPPORT ─────────────────────────────────────────────────────────
 def test_proxy():

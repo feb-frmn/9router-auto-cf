@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """
-cf_farmer.py — Cloudflare Workers AI Token Harvester (Anti-Ban Edition)
+cf_farmer.py — Cloudflare Workers AI Token Harvester
 
-Features:
-  - Google OAuth login (Gmail + GSuite custom domains)
-  - Anti-ban: randomized fingerprint, human-like delays, trace removal
-  - Proxy support (per-account or global)
-  - Auto-dedup (skip already-harvested accounts)
-  - Single file, zero external config
+Flow:
+  1. Read email|password from akun.txt
+  2. Sign up Cloudflare with that email + password
+  3. Wait for email verification (user verifies or bot detects redirect)
+  4. Create Workers AI API token
+  5. Save to cf_keys.txt
+
+Also supports:
+  - Google OAuth (Gmail/GSuite) — auto-detect
+  - Existing CF accounts (email+password login)
+  - Per-account or global proxy
+  - Anti-ban: fingerprint randomization, trace removal, human delays
 
 Usage:
-  python3 cf_farmer.py                           # harvest all accounts
+  python3 cf_farmer.py                           # signup all accounts in akun.txt
   python3 cf_farmer.py --proxy http://ip:port    # global proxy
   python3 cf_farmer.py --only user@email.com    # single account
+  python3 cf_farmer.py --delay 30               # custom delay
   python3 cf_farmer.py --clean                   # reset cf_keys.txt
-  python3 cf_farmer.py --delay 30                # custom delay (seconds)
 
 akun.txt format:
   email|password
@@ -38,7 +44,6 @@ MODELS = '["@cf/zai-org/glm-5.2","@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
 
 # ─── Anti-Ban Utilities ────────────────────────────────────────────────────────
 
-# Realistic user agents (rotated per account)
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -46,11 +51,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
-# Window sizes for fingerprint randomization
 WINDOW_SIZES = ["1280,720", "1366,768", "1440,900", "1536,864", "1920,1080"]
 
 def random_fingerprint():
-    """Generate randomized browser fingerprint per account."""
     return {
         "user_agent": random.choice(USER_AGENTS),
         "window_size": random.choice(WINDOW_SIZES),
@@ -58,14 +61,12 @@ def random_fingerprint():
     }
 
 def human_type(ele, text):
-    """Type like a human with variable delays."""
     ele.clear()
     for char in text:
         ele.input(char)
         time.sleep(random.uniform(0.03, 0.15))
 
 def human_click(page, ele):
-    """Click like a human with mouse movement."""
     try:
         page.actions.move_to(ele)
         time.sleep(random.uniform(0.2, 0.6))
@@ -74,14 +75,11 @@ def human_click(page, ele):
     ele.click()
 
 def human_delay(min_s=1.0, max_s=3.0):
-    """Random delay to mimic human behavior."""
     time.sleep(random.uniform(min_s, max_s))
 
 def wipe_profile_traces(profile_dir):
-    """Remove fingerprint traces from browser profile after harvest."""
     if not profile_dir.exists():
         return
-    # Delete cache, cookies, history, and other tracking artifacts
     trace_paths = [
         profile_dir / "Default" / "Cache",
         profile_dir / "Default" / "Code Cache",
@@ -123,7 +121,6 @@ def read_accounts():
     return accounts
 
 def get_harvested():
-    """Get set of already-harvested account IDs from cf_keys.txt."""
     if not RESULT_FILE.exists():
         return set()
     ids = set()
@@ -136,7 +133,6 @@ def get_harvested():
 # ─── CF API (via browser session) ──────────────────────────────────────────────
 
 def get_wa_permission_ids(page):
-    """Fetch Workers AI permission group IDs from CF API."""
     result = page.run_js("""
         return (async () => {
             const resp = await fetch('/api/v4/user/tokens/permission_groups');
@@ -145,14 +141,11 @@ def get_wa_permission_ids(page):
     """)
     if not result or not result.get('success'):
         return []
-    # Return only id — name is for logging, not sent to API
     return [{"id": g["id"], "name": g.get("name", "")}
             for g in result.get('result', [])
             if 'workers ai' in g.get('name', '').lower()]
 
 def create_token_via_api(page, account_id, perm_ids):
-    """Create API token via CF internal API. Only sends id field (anti-ban)."""
-    # CF API expects [{"id": "..."}] — extra fields like name can cause 400
     clean_perms = [{"id": p["id"]} for p in perm_ids]
     payload = json.dumps({
         "name": f"cf-ai-{int(time.time())}",
@@ -177,10 +170,253 @@ def create_token_via_api(page, account_id, perm_ids):
         return result['result']['value']
     return None
 
-# ─── Harvest Flow ──────────────────────────────────────────────────────────────
+# ─── Browser Setup ─────────────────────────────────────────────────────────────
+
+def setup_browser(index, fp, proxy=None):
+    profile_hash = hashlib.md5(f"{index}_{time.time()}".encode()).hexdigest()[:8]
+    profile_dir = PROFILE_ROOT / f"acc_{profile_hash}"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    co = ChromiumOptions()
+    co.set_argument("--headless=new")
+    co.set_argument("--disable-blink-features=AutomationControlled")
+    co.set_argument(f"--window-size={fp['window_size']}")
+    co.set_argument("--no-sandbox")
+    co.set_argument("--disable-gpu")
+    co.set_argument("--disable-dev-shm-usage")
+    co.set_argument(f"--user-data-dir={profile_dir}")
+    co.set_argument(f"--user-agent={fp['user_agent']}")
+    co.set_argument("--disable-extensions")
+    co.set_argument("--disable-popup-blocking")
+    co.set_argument("--disable-default-apps")
+    co.set_argument("--disable-infobars")
+    co.set_argument("--disable-notifications")
+    if proxy:
+        co.set_argument(f"--proxy-server={proxy}")
+    co.set_local_port(9200 + index)
+
+    return ChromiumPage(co), profile_dir
+
+# ─── Extract Account ID ────────────────────────────────────────────────────────
+
+def extract_account_id(page):
+    for tid in page.tab_ids:
+        try:
+            t = page.get_tab(tid)
+            url = t.url or ""
+            if "dash.cloudflare.com/" in url:
+                parts = url.split("dash.cloudflare.com/")
+                if len(parts) > 1:
+                    aid = parts[1].split("/")[0].split("?")[0]
+                    if len(aid) == 32 and all(c in '0123456789abcdef' for c in aid):
+                        return aid, t
+        except Exception:
+            continue
+    page.get("https://dash.cloudflare.com/")
+    human_delay(4.0, 6.0)
+    parts = (page.url or "").split("dash.cloudflare.com/")
+    if len(parts) > 1:
+        aid = parts[1].split("/")[0].split("?")[0]
+        if len(aid) == 32 and all(c in '0123456789abcdef' for c in aid):
+            return aid, page
+    return None, page
+
+# ─── CF Signup ─────────────────────────────────────────────────────────────────
+
+def cf_signup(page, email, password):
+    """Sign up a new CF account. Returns True if signup form submitted."""
+    print(f" [2] CF Signup: {email}")
+    page.get("https://dash.cloudflare.com/sign-up")
+    human_delay(4.0, 7.0)
+
+    email_field = None
+    for _ in range(3):
+        email_field = (page.ele('tag:input@type=email', timeout=3)
+                       or page.ele('#email', timeout=1)
+                       or page.ele('tag:input@name=email', timeout=1))
+        if email_field:
+            break
+        time.sleep(1)
+
+    if not email_field:
+        raise Exception("Signup: email field not found")
+
+    human_type(email_field, email)
+    human_delay(0.3, 0.8)
+
+    pw_field = (page.ele('tag:input@type=password', timeout=3)
+                or page.ele('#password', timeout=2))
+    if not pw_field:
+        raise Exception("Signup: password field not found")
+
+    human_type(pw_field, password)
+    human_delay(0.5, 1.0)
+
+    signup_btn = (page.ele('@type=submit', timeout=3)
+                  or page.ele('@text():Sign Up', timeout=2)
+                  or page.ele('@text():Create Account', timeout=2)
+                  or page.ele('tag:button@@type=submit', timeout=2))
+    if signup_btn:
+        human_click(page, signup_btn)
+    else:
+        try:
+            page.run_js("document.querySelector('form').submit();")
+        except Exception:
+            pass
+
+    print(" [3] Signup form submitted...")
+    human_delay(5.0, 8.0)
+    return True
+
+# ─── CF Login (email+password) ────────────────────────────────────────────────
+
+def cf_login_email(page, email, password):
+    print(f" [2] CF login: {email}")
+    page.get("https://dash.cloudflare.com/login")
+    human_delay(4.0, 7.0)
+
+    email_field = None
+    for _ in range(3):
+        email_field = (page.ele('tag:input@type=email', timeout=3) or page.ele('#email', timeout=1))
+        if email_field:
+            break
+        time.sleep(1)
+
+    if not email_field:
+        return False
+
+    human_type(email_field, email)
+    human_delay(0.3, 0.8)
+
+    pw_field = page.ele('tag:input@type=password', timeout=3) or page.ele('#password', timeout=2)
+    if not pw_field:
+        return False
+
+    human_type(pw_field, password)
+    human_delay(0.5, 1.0)
+
+    login_btn = (page.ele('@type=submit', timeout=3)
+                 or page.ele('@text():Log In', timeout=2)
+                 or page.ele('tag:button@@type=submit', timeout=2))
+    if login_btn:
+        human_click(page, login_btn)
+    else:
+        try:
+            page.run_js("document.querySelector('form').submit();")
+        except Exception:
+            pass
+
+    human_delay(6.0, 9.0)
+    return "/login" not in (page.url or "")
+
+# ─── Google OAuth ──────────────────────────────────────────────────────────────
+
+def cf_login_google(page, email, password):
+    print(" [2] Google OAuth...")
+    google_btn = page.ele('@text():Google', timeout=10)
+    if not google_btn:
+        return False
+
+    tabs_before = set(page.tab_ids)
+    human_click(page, google_btn)
+    human_delay(3.0, 5.0)
+
+    new_tab_id = None
+    for _ in range(6):
+        time.sleep(1)
+        new_tabs = set(page.tab_ids) - tabs_before
+        if new_tabs:
+            new_tab_id = new_tabs.pop()
+            break
+    if not new_tab_id:
+        for tid in page.tab_ids:
+            try:
+                t = page.get_tab(tid)
+                if "accounts.google.com" in (t.url or ""):
+                    new_tab_id = tid
+                    break
+            except Exception:
+                continue
+    if not new_tab_id:
+        return False
+
+    tab = page.get_tab(new_tab_id)
+    human_delay(2.0, 4.0)
+
+    if "accountchooser" in (tab.url or ""):
+        btn = tab.ele("@text():Use another account", timeout=3)
+        if btn:
+            human_click(tab, btn)
+            human_delay(2.0, 4.0)
+
+    print(f" [3] Google login: {email}")
+    tab.wait.ele_displayed("#identifierId", timeout=15)
+    human_type(tab.ele('#identifierId'), email)
+    human_delay(0.5, 1.0)
+    human_click(tab, tab.ele('#identifierNext'))
+    human_delay(4.0, 6.0)
+
+    pw_ele = tab.ele('@type=password', timeout=10)
+    if not pw_ele:
+        return False
+    human_type(pw_ele, password)
+    human_delay(0.5, 1.0)
+    human_click(tab, tab.ele('#passwordNext'))
+    human_delay(6.0, 9.0)
+
+    cur = tab.url or ""
+    if "workspacetermsofservice" in cur or "speedbump" in cur:
+        btn = tab.ele('tag:button@@text():I understand', timeout=5)
+        if btn:
+            human_click(tab, btn)
+            human_delay(4.0, 7.0)
+
+    for _ in range(5):
+        time.sleep(2)
+        cur = tab.url or ""
+        if "accounts.google.com" not in cur:
+            break
+        for sel in ['@text():Allow', '@text():Continue', '@text():Accept']:
+            btn = tab.ele(sel, timeout=1)
+            if btn:
+                human_click(tab, btn)
+                time.sleep(2)
+                break
+
+    human_delay(5.0, 8.0)
+    return True
+
+# ─── Harvest Token ─────────────────────────────────────────────────────────────
+
+def harvest_token(page, account_id):
+    print(f" [5] Account ID: {account_id}")
+
+    harvested = get_harvested()
+    if account_id in harvested:
+        print(f" [SKIP] Already harvested")
+        return "SKIP"
+
+    print(" [6] Fetch Workers AI permissions...")
+    perm_ids = get_wa_permission_ids(page)
+    if not perm_ids:
+        raise Exception("Failed to get permission groups")
+    print(f"    {len(perm_ids)} permissions: {[p['name'] for p in perm_ids]}")
+
+    print(" [7] Create API token...")
+    token = create_token_via_api(page, account_id, perm_ids)
+    return token
+
+def save_token(account_id, token):
+    base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
+    with open(RESULT_FILE, "a") as f:
+        f.write(f"cloudflare_{account_id[:6]}|{base_url}|{token}|{MODELS}\n")
+    print(f" [SUCCESS] Token: {token[:25]}...")
+    print(f" [SAVED] → {RESULT_FILE}")
+
+# ─── Main Harvest ──────────────────────────────────────────────────────────────
 
 def harvest_one(account, index, total, global_proxy=None):
-    """Harvest a single CF account. Returns True on success."""
+    """Harvest one CF account: try signup → login → Google OAuth."""
     email = account["email"]
     password = account["password"]
     proxy = account.get("proxy") or global_proxy
@@ -191,36 +427,12 @@ def harvest_one(account, index, total, global_proxy=None):
         print(f" Proxy: {proxy[:40]}...")
     print(f"{'='*55}")
 
-    # Anti-ban: randomize fingerprint per account
     fp = random_fingerprint()
-
-    # Profile per account — fresh each time
-    profile_hash = hashlib.md5(f"{email}_{index}".encode()).hexdigest()[:8]
-    profile_dir = PROFILE_ROOT / f"acc_{profile_hash}"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-
-    co = ChromiumOptions()
-    co.set_argument("--disable-blink-features=AutomationControlled")
-    co.set_argument(f"--window-size={fp['window_size']}")
-    co.set_argument("--no-sandbox")
-    co.set_argument("--disable-gpu")
-    co.set_argument("--disable-dev-shm-usage")
-    co.set_argument(f"--user-data-dir={profile_dir}")
-    co.set_argument(f"--user-agent={fp['user_agent']}")
-    # Anti-detection: hide automation signals
-    co.set_argument("--disable-extensions")
-    co.set_argument("--disable-popup-blocking")
-    co.set_argument("--disable-default-apps")
-    co.set_argument("--disable-infobars")
-    co.set_argument("--disable-notifications")
-    if proxy:
-        co.set_argument(f"--proxy-server={proxy}")
-    co.set_local_port(9200 + index)
-
-    main_page = page = ChromiumPage(co)
+    page, profile_dir = setup_browser(index, fp, proxy)
+    main_page = page
 
     try:
-        # ── [0] Clear any previous session ──
+        # Clear session
         print(" [0] Clear session...")
         try:
             page.get("https://dash.cloudflare.com/logout")
@@ -231,169 +443,81 @@ def harvest_one(account, index, total, global_proxy=None):
             page.set.cookies.clear()
         except Exception:
             pass
-        try:
-            page.get("https://accounts.google.com/Logout")
-            human_delay(2.0, 4.0)
-            page.set.cookies.clear()
-        except Exception:
-            pass
 
-        # ── [1] Open CF login ──
-        print(" [1] Open Cloudflare login...")
-        page.get("https://dash.cloudflare.com/login")
-        human_delay(4.0, 7.0)
+        # Step 1: Try CF signup first (new accounts)
+        print(" [1] CF signup...")
+        signup_ok = cf_signup(page, email, password)
+        human_delay(3.0, 5.0)
 
-        # Check if already logged in (shouldn't happen after clear)
-        if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
-            print("    Session still active — clearing again")
-            try:
-                page.set.cookies.clear()
-            except Exception:
-                pass
-            page.get("https://dash.cloudflare.com/login")
-            human_delay(3.0, 5.0)
+        cur_url = page.url or ""
 
-        if "dash.cloudflare.com/" in page.url and "/login" not in page.url:
-            print("    Already logged in")
-        else:
-            # ── [2] Click Continue with Google ──
-            print(" [2] Google OAuth...")
-            google_btn = page.ele('@text():Google', timeout=10)
-            if not google_btn:
-                raise Exception("Google button not found")
-
-            tabs_before = set(page.tab_ids)
-            human_click(page, google_btn)
-            human_delay(3.0, 5.0)
-
-            # Find Google OAuth tab
-            new_tab_id = None
-            for _ in range(6):
-                time.sleep(1)
-                new_tabs = set(page.tab_ids) - tabs_before
-                if new_tabs:
-                    new_tab_id = new_tabs.pop()
-                    break
-            if not new_tab_id:
-                for tid in page.tab_ids:
-                    try:
-                        t = page.get_tab(tid)
-                        if "accounts.google.com" in (t.url or ""):
-                            new_tab_id = tid
-                            break
-                    except Exception:
-                        continue
-            if not new_tab_id:
-                raise Exception("Google OAuth tab not found")
-
-            tab = page.get_tab(new_tab_id)
-            print(f" [3] Google tab: {tab.url[:60]}...")
-            human_delay(2.0, 4.0)
-
-            # Account Chooser
-            if "accountchooser" in (tab.url or ""):
-                print("    Account Chooser → another account")
-                btn = tab.ele("@text():Use another account", timeout=3)
-                if btn:
-                    human_click(tab, btn)
-                    human_delay(2.0, 4.0)
-
-            # Input email
-            print(f" [4] Login: {email}")
-            tab.wait.ele_displayed("#identifierId", timeout=15)
-            human_type(tab.ele('#identifierId'), email)
-            human_delay(0.5, 1.0)
-            human_click(tab, tab.ele('#identifierNext'))
-            human_delay(4.0, 6.0)
-
-            # Input password
-            pw_ele = tab.ele('@type=password', timeout=10)
-            if not pw_ele:
-                raise Exception("Password field not found")
-            human_type(pw_ele, password)
-            human_delay(0.5, 1.0)
-            human_click(tab, tab.ele('#passwordNext'))
-            human_delay(6.0, 9.0)
-
-            # Workspace TOS (GSuite accounts)
-            cur = tab.url or ""
-            if "workspacetermsofservice" in cur or "speedbump" in cur:
-                print("    Handle Workspace TOS...")
-                btn = tab.ele('tag:button@@text():I understand', timeout=5)
-                if btn:
-                    human_click(tab, btn)
-                    human_delay(4.0, 7.0)
-
-            # Google consent screen
-            for _ in range(5):
-                time.sleep(2)
-                cur = tab.url or ""
-                if "accounts.google.com" not in cur:
-                    break
-                for sel in ['@text():Allow', '@text():Continue', '@text():Accept']:
-                    btn = tab.ele(sel, timeout=1)
-                    if btn:
-                        human_click(tab, btn)
-                        time.sleep(2)
-                        break
-
-            # Wait for redirect to CF dashboard
-            print(" [5] Waiting for CF dashboard redirect...")
-            human_delay(5.0, 8.0)
-
-        # ── [6] Extract Account ID ──
-        account_id = None
-        for tid in page.tab_ids:
-            try:
-                t = page.get_tab(tid)
-                url = t.url or ""
-                if "dash.cloudflare.com/" in url:
-                    parts = url.split("dash.cloudflare.com/")
+        # Check if we're on dashboard (signup succeeded, no verification needed)
+        if "dash.cloudflare.com/" in cur_url and "/sign-up" not in cur_url and "/login" not in cur_url:
+            print("    Signup success — no verification needed!")
+        # Check if CF requires email verification
+        elif "verify" in cur_url.lower() or "/sign-up" in cur_url:
+            print(" [4] CF requires email verification.")
+            print("    Please verify your email, then re-run this tool.")
+            print("    (Bot will auto-detect if already verified)")
+            # Wait up to 180s for user to verify email
+            print("    Waiting up to 180s for verification...")
+            for wait_round in range(36):
+                time.sleep(5)
+                # Try navigating to dashboard
+                page.get("https://dash.cloudflare.com/")
+                human_delay(2.0, 3.0)
+                cur_url = page.url or ""
+                if "dash.cloudflare.com/" in cur_url and "/login" not in cur_url and "/sign-up" not in cur_url:
+                    # Check if we actually have an account ID
+                    parts = cur_url.split("dash.cloudflare.com/")
                     if len(parts) > 1:
                         aid = parts[1].split("/")[0].split("?")[0]
                         if len(aid) == 32 and all(c in '0123456789abcdef' for c in aid):
-                            account_id = aid
-                            page = t
+                            print("    Email verified! Proceeding...")
                             break
-            except Exception:
-                continue
+                # Still waiting
+                if wait_round % 6 == 5:
+                    print(f"    Still waiting... ({(wait_round+1)*5}s)")
 
-        if not account_id:
-            page.get("https://dash.cloudflare.com/")
-            human_delay(4.0, 6.0)
-            parts = page.url.split("dash.cloudflare.com/")
-            if len(parts) > 1:
-                aid = parts[1].split("/")[0].split("?")[0]
-                if len(aid) == 32 and all(c in '0123456789abcdef' for c in aid):
-                    account_id = aid
+            # Check final state
+            cur_url = page.url or ""
+            if "/login" in cur_url or "/sign-up" in cur_url:
+                # Signup didn't work — try login (maybe account already exists)
+                print(" [4b] Trying CF login (account may already exist)...")
+                logged_in = cf_login_email(page, email, password)
+                if not logged_in:
+                    # Try Google OAuth
+                    print(" [4c] Trying Google OAuth...")
+                    page.get("https://dash.cloudflare.com/login")
+                    human_delay(3.0, 5.0)
+                    logged_in = cf_login_google(page, email, password)
+                if not logged_in:
+                    raise Exception("Signup and login both failed. Verify email and re-run.")
+                human_delay(5.0, 8.0)
+        else:
+            # Unknown state — try login
+            print(" [4b] Trying CF login...")
+            logged_in = cf_login_email(page, email, password)
+            if not logged_in:
+                print(" [4c] Trying Google OAuth...")
+                page.get("https://dash.cloudflare.com/login")
+                human_delay(3.0, 5.0)
+                logged_in = cf_login_google(page, email, password)
+            if not logged_in:
+                raise Exception("All login methods failed")
+            human_delay(5.0, 8.0)
 
+        # Extract account ID
+        account_id, page = extract_account_id(page)
         if not account_id:
             raise Exception(f"Failed to get Account ID. URL: {page.url}")
 
-        print(f" [6] Account ID: {account_id}")
-
-        # Dedup check
-        harvested = get_harvested()
-        if account_id in harvested:
-            print(f" [SKIP] Already harvested")
+        # Harvest token
+        token = harvest_token(page, account_id)
+        if token and token != "SKIP":
+            save_token(account_id, token)
             return True
-
-        # ── [7] Create API Token ──
-        print(" [7] Fetch Workers AI permissions...")
-        perm_ids = get_wa_permission_ids(page)
-        if not perm_ids:
-            raise Exception("Failed to get permission groups")
-        print(f"    {len(perm_ids)} permissions: {[p['name'] for p in perm_ids]}")
-
-        print(" [8] Create API token...")
-        token = create_token_via_api(page, account_id, perm_ids)
-
-        if token:
-            base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
-            with open(RESULT_FILE, "a") as f:
-                f.write(f"cloudflare_{account_id[:6]}|{base_url}|{token}|{MODELS}\n")
-            print(f" [SUCCESS] Token: {token[:25]}...")
-            print(f" [SAVED] → {RESULT_FILE}")
+        elif token == "SKIP":
             return True
         else:
             print(" [FAILED] Token creation failed")
@@ -403,23 +527,19 @@ def harvest_one(account, index, total, global_proxy=None):
         print(f" [ERROR] {email}: {e}")
         return False
     finally:
-        # ── [9] Anti-ban: wipe all traces ──
         try:
             main_page.quit()
         except Exception:
             pass
-        # Wipe profile traces (cookies, cache, history)
         wipe_profile_traces(profile_dir)
-        # Random delay between accounts (anti-pattern detection)
         human_delay(1.0, 2.0)
-
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 
 BANNER = r"""
   ╔═══════════════════════════════════════════════╗
-  ║  Cloudflare Workers AI Farmer — Anti-Ban     ║
-  ║  ☕ https://saweria.co/febfrmn                ║
+  ║  CF Workers AI Farmer — Signup + Harvest      ║
+  ║  ☕ https://saweria.co/febfrmn                  ║
   ╚═══════════════════════════════════════════════╝
 """
 
@@ -429,7 +549,6 @@ def main():
     parser.add_argument("--only", help="Harvest single account (email)")
     parser.add_argument("--delay", type=int, default=15, help="Delay between accounts (seconds)")
     parser.add_argument("--clean", action="store_true", help="Delete cf_keys.txt and exit")
-    parser.add_argument("--keep-profiles", action="store_true", help="Don't wipe profiles (debug only)")
     args = parser.parse_args()
 
     print(BANNER)
@@ -446,16 +565,21 @@ def main():
     if args.only:
         accounts = [a for a in accounts if a["email"] == args.only]
     if not accounts:
-        print("Isi akun.txt (email|password atau email|password|proxy)")
+        print("Usage:")
+        print("  python3 cf_farmer.py                     # signup + harvest from akun.txt")
+        print("  python3 cf_farmer.py --only user@x.com   # single account")
+        print("  python3 cf_farmer.py --proxy http://...   # with proxy")
+        print("  python3 cf_farmer.py --clean              # reset cf_keys.txt")
+        print("\nakun.txt format:")
+        print("  email|password")
+        print("  email|password|http://proxy:port  (optional proxy)")
         sys.exit(1)
 
-    # Show existing tokens
     existing = get_harvested()
     if existing:
-        print(f"⚠️  cf_keys.txt has {len(existing)} keys. Duplicates auto-skipped.")
-        print(f"   Fresh run? python3 cf_farmer.py --clean\n")
+        print(f"⚠️  cf_keys.txt has {len(existing)} keys. Duplicates auto-skipped.\n")
 
-    print(f"Total accounts: {len(accounts)}")
+    print(f"Mode: Signup + Harvest ({len(accounts)} accounts)")
     print(f"Proxy: {args.proxy or 'per-account or none'}")
     print(f"Anti-ban: fingerprint randomization + trace removal + human delays")
     print()

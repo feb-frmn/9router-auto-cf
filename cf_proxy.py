@@ -300,7 +300,12 @@ def cf_models_url(account_id):
     return f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/models/search"
 
 def call_cf(url, api_key, body, stream=False, timeout=120):
-    """Call CF API, return (status, json/text, usage)."""
+    """Call CF API.
+    Returns (status, json_or_text, usage) on success,
+    (status, text, None, error_code) on HTTP error,
+    (0, error_str, None, None) on network error.
+    For stream=True, returns (status, response_bytes, None) — reads full body.
+    """
     data = json.dumps(body).encode() if body else None
     req = Request(url, data=data, headers={
         "Authorization": f"Bearer {api_key}",
@@ -309,10 +314,11 @@ def call_cf(url, api_key, body, stream=False, timeout=120):
     try:
         with urlopen(req, timeout=timeout) as resp:
             status = resp.status
+            raw_bytes = resp.read()
             if stream:
-                # For streaming, return raw response for piping
-                return status, resp, None
-            raw = resp.read().decode()
+                # Return raw bytes for streaming — caller pipes it through
+                return status, raw_bytes, None
+            raw = raw_bytes.decode()
             try:
                 j = json.loads(raw)
                 usage = j.get("usage") or (j.get("result", {}) or {}).get("usage")
@@ -321,7 +327,6 @@ def call_cf(url, api_key, body, stream=False, timeout=120):
                 return status, raw, None
     except HTTPError as e:
         raw = e.read().decode()
-        # Try to extract error code
         error_code = None
         try:
             j = json.loads(raw)
@@ -332,6 +337,8 @@ def call_cf(url, api_key, body, stream=False, timeout=120):
             pass
         return e.code, raw, None, error_code
     except URLError as e:
+        return 0, str(e), None, None
+    except Exception as e:
         return 0, str(e), None, None
 
 # ─── HTTP Server ───────────────────────────────────────────────────────────────
@@ -459,20 +466,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             continue
                         self._send_json(status, {"error": text[:500]})
                         continue
-                    # result = (status, response_obj, usage)
-                    status, resp, usage = result
-                    # Actually stream the response
-                    self.send_response(200)
+                    # result = (status, response_bytes, usage) — 3-tuple
+                    status, resp_bytes, usage = result
+                    # Stream the response bytes to client
+                    self.send_response(status)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Content-Length", str(len(resp_bytes)))
                     self.end_headers()
                     try:
-                        while True:
-                            chunk = resp.read(4096)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
+                        self.wfile.write(resp_bytes)
+                        self.wfile.flush()
                     except Exception:
                         pass
                     pool.mark_success(account["id"], model, usage)

@@ -8,10 +8,10 @@ Automated Cloudflare Workers AI token harvester + inference proxy with anti-ban 
 # 1. Install
 pip install DrissionPage requests
 
-# 2. Add accounts (email|password or email|password|proxy)
-echo "your@gmail.com|yourpassword" > akun.txt
+# 2. Add your emails (email|password)
+echo "your@email.com|yourpassword" > akun.txt
 
-# 3. Harvest tokens
+# 3. Sign up + harvest tokens
 python3 cf_farmer.py
 
 # 4. Start inference proxy
@@ -21,42 +21,46 @@ python3 cf_proxy.py
 python3 test_demo.py --verbose
 ```
 
-## Two Tools, One Pipeline
+## How It Works
 
-### 1. cf_farmer.py — Token Harvester
+### cf_farmer.py — Token Harvester
 
-Harvests Cloudflare Workers AI API tokens via Google OAuth.
+Reads `akun.txt`, then for each account:
+
+1. **CF Signup** — fills signup form at `dash.cloudflare.com/sign-up`
+2. **Email verification** — waits up to 180s for you to verify email
+3. **Fallback** — if account already exists, tries CF login → Google OAuth
+4. **Token creation** — creates Workers AI API token via CF internal API
+5. **Save** — writes to `cf_keys.txt`
 
 ```bash
-python3 cf_farmer.py                           # harvest all
-python3 cf_farmer.py --proxy http://ip:port    # global proxy
+python3 cf_farmer.py                           # signup + harvest all
 python3 cf_farmer.py --only user@email.com    # single account
-python3 cf_farmer.py --clean                   # reset cf_keys.txt
+python3 cf_farmer.py --proxy http://ip:port    # global proxy
 python3 cf_farmer.py --delay 30               # custom delay
+python3 cf_farmer.py --clean                   # reset cf_keys.txt
 ```
 
 **akun.txt format:**
 ```
 email|password
-email|password|http://proxy:port     # per-account proxy
+email|password|http://proxy:port     # per-account proxy (optional)
 ```
 
 **Anti-ban features:**
 - Randomized browser fingerprint (user agent, window size, timezone)
 - Human-like typing & clicking delays
-- Profile trace removal after each account (cache, cookies, history)
-- Session logout before each login
+- Profile trace removal after each account
+- Session logout before each signup
 - Random delays between accounts
-- Per-account browser profile (no session bleed)
-- Only sends `id` field to CF API (no `name` leak = no 400)
+- Headless mode for servers
 
-**GSuite support:**
-- Works with `@gmail.com` AND custom domain GSuite
-- Handles Workspace TOS screen
-- Handles Account Chooser
-- Handles Google consent screens
+**Supported email types:**
+- Gmail / GSuite (via Google OAuth fallback)
+- Any email (via CF signup — user provides email)
+- Existing CF accounts (via CF email+password login)
 
-### 2. cf_proxy.py — Inference Proxy
+### cf_proxy.py — Inference Proxy
 
 OpenAI-compatible proxy that rotates across all harvested accounts.
 
@@ -77,22 +81,6 @@ python3 cf_proxy.py --import-9router  # import from 9Router DB
 - Web dashboard at `http://localhost:8750/`
 - Import from cf_keys.txt OR 9Router DB
 
-**Neuron tracking:**
-```
-neurons ≈ prompt_tokens × rate_in + completion_tokens × rate_out
-```
-- Rates from CF pricing page per model
-- Unknown models → 70b-class fallback (skip early, don't overrun)
-- 10,000 free neurons/day per account
-- Reset at 00:00 UTC
-
-**9Router integration:**
-```
-Base URL: http://127.0.0.1:8750/v1
-API Key: (whatever you set with --key)
-Models: @cf/meta/llama-3.3-70b-instruct-fp8-fast, etc.
-```
-
 ## Output Format
 
 `cf_keys.txt`:
@@ -103,11 +91,10 @@ cloudflare_abc123|https://api.cloudflare.com/client/v4/accounts/abc123.../ai/v1|
 ## Test Suite
 
 ```bash
-python3 test_demo.py --verbose    # full (49 tests)
-python3 test_demo.py --quick      # skip browser tests
+python3 test_demo.py --verbose    # full (59 tests)
 ```
 
-Categories: syntax, import, logic, token format, permission fix, bare except, anti-ban, proxy, GSuite, neuron tracking, E2E mock.
+Categories: syntax, import, logic, token format, permission fix, bare except, anti-ban, CF signup, proxy, GSuite, neuron tracking, E2E mock.
 
 ## ☕ Support
 
